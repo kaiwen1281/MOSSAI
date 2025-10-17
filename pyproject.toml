@@ -1,0 +1,16 @@
+[project]
+name = "moss-ai"
+version = "0.1.0"
+description = "Add your description here"
+requires-python = ">=3.13"
+dependencies = [
+    "alibabacloud-ice20201109>=6.6.1",
+    "fastapi>=0.119.0",
+    "httpx>=0.28.1",
+    "oss2>=2.19.1",
+    "pillow>=12.0.0",
+    "pydantic-settings>=2.11.0",
+    "python-dotenv>=1.1.1",
+    "uvicorn>=0.37.0",
+    "volcengine-python-sdk>=4.0.24",
+]
