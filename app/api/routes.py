@@ -195,7 +195,7 @@ async def analyze_video(
     background_tasks: BackgroundTasks
 ) -> TaskResponse:
     """
-    统一的视频分析接口 - 抽帧 + AI分析（立即返回task_id）
+    短视频素材打标接口 - 抽帧 + AI打标分析（立即返回task_id）
     
     必需参数：
     - **moss_id**: MOSS系统视频ID
@@ -205,9 +205,14 @@ async def analyze_video(
     
     工作流程：
     1. 立即返回 task_id
-    2. 后台执行：获取媒资信息 → 抽帧 → AI分析
+    2. 后台执行：获取媒资信息 → 抽帧 → 短视频素材打标分析
     3. MOSS 轮询查询状态：GET /api/task/{task_id}
     4. 完成后 MOSS 获取结果并调用 DELETE /api/task/{task_id}
+    
+    打标内容包括：
+    - 核心主体、动作事件、场景设置
+    - 视觉风格、色彩基调、主导情感
+    - 氛围标签、网络热梗标签、关键词
     """
     try:
         # Generate unique task ID
@@ -334,40 +339,61 @@ async def process_video_analysis_task(
             task_data["progress"] = 60
             task_data["updated_at"] = datetime.now()
             
-            # AI分析（使用固定的内置提示词）
-            logger.info(f"[{task_id}] Analyzing {len(frames)} frames with AI")
+            # 短视频素材打标分析
+            logger.info(f"[{task_id}] Analyzing {len(frames)} frames for short video tagging")
             context = {
                 "duration": media_info.get("duration", 0),
                 "resolution": media_info.get("resolution"),
                 "frame_count": len(frames),
             }
             
-            analysis_result = await doubao_service.analyze_frames(
+            # 使用新的短视频打标分析功能
+            tagging_result = await doubao_service.analyze_short_video_frames(
                 frame_urls=task_data["frames"],
-                context=context,
-                # 不传 custom_prompt，使用内置固定提示词
+                context=context
             )
             
             # 构建完整结果
             task_data["status"] = TaskStatus.COMPLETED
-            task_data["message"] = "视频分析完成"
+            task_data["message"] = "短视频素材打标完成"
             task_data["progress"] = 100
+            
+            # 确保所有列表字段都不为None，始终返回空列表而不是null
+            def ensure_list(value):
+                """确保值是列表，如果是None则返回空列表"""
+                if value is None:
+                    return []
+                if isinstance(value, list):
+                    return value
+                return []
+            
+            # 构建安全的tagging数据，确保所有列表字段都不为None
+            safe_atmosphere_tags = ensure_list(tagging_result.atmosphere_tags)
+            safe_viral_meme_tags = ensure_list(tagging_result.viral_meme_tags)
+            safe_keywords = ensure_list(tagging_result.keywords)
+            
             task_data["result"] = {
                 "moss_id": request.moss_id,
                 "brand_name": request.brand_name,
                 "media_id": request.media_id,
                 "frame_level": request.frame_level.value,
-                "analysis": {
-                    "summary": analysis_result.summary,
-                    "detailed_content": analysis_result.detailed_content,
-                    "tags": analysis_result.tags,
-                    "segments": analysis_result.segments,
+                "tagging": {
+                    "main_subject": tagging_result.main_subject or "",
+                    "action_or_event": tagging_result.action_or_event or "",
+                    "scene_setting": tagging_result.scene_setting or "",
+                    "visual_style": tagging_result.visual_style or "",
+                    "color_palette": tagging_result.color_palette or "",
+                    "emotion_dominant": tagging_result.emotion_dominant or "",
+                    "atmosphere_tags": safe_atmosphere_tags,
+                    "viral_meme_tags": safe_viral_meme_tags,
+                    "keywords": safe_keywords
                 },
                 "metadata": {
                     "frame_count": len(frames),
                     "video_duration": media_info.get("duration"),
                     "video_resolution": media_info.get("resolution"),
                     "model_used": settings.doubao_model,
+                    "analysis_type": "short_video_tagging"
                 }
             }
             task_data["completed_at"] = datetime.now()

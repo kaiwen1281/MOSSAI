@@ -6,7 +6,7 @@ import json
 import httpx
 
 from app.core.config import settings
-from app.models.schemas import AnalysisResult
+from app.models.schemas import AnalysisResult, ShortVideoTaggingResult
 
 logger = logging.getLogger(__name__)
 
@@ -425,6 +425,193 @@ class DoubaoService:
             
         except Exception as e:
             logger.error(f"Error analyzing single image: {str(e)}")
+            raise
+    
+    async def analyze_short_video_frames(
+        self,
+        frame_urls: List[str],
+        context: Optional[Dict] = None
+    ) -> ShortVideoTaggingResult:
+        """
+        专门用于短视频素材打标的帧分析
+        
+        Args:
+            frame_urls: List of frame image URLs (in time order)
+            context: Video context information (duration, resolution, etc.)
+            
+        Returns:
+            ShortVideoTaggingResult object
+        """
+        try:
+            # Check frame count
+            if len(frame_urls) > self.max_images:
+                logger.warning(
+                    f"Frame count {len(frame_urls)} exceeds max {self.max_images}. "
+                    f"Will use first {self.max_images} frames for short video tagging."
+                )
+                frame_urls = frame_urls[:self.max_images]
+            
+            # Build messages for short video tagging
+            messages = self._build_short_video_tagging_messages(frame_urls, context)
+            
+            # Call Doubao API
+            response_data = await self._call_api(messages)
+            
+            # Parse response
+            result = self._parse_short_video_tagging_response(response_data)
+            
+            logger.info(f"Successfully analyzed {len(frame_urls)} frames for short video tagging")
+            return result
+            
+        except Exception as e:
+            logger.error(f"Error analyzing short video frames: {str(e)}")
+            raise
+    
+    def _build_short_video_tagging_messages(
+        self,
+        image_urls: List[str],
+        context: Optional[Dict] = None
+    ) -> List[Dict]:
+        """
+        构建短视频素材打标的消息
+        
+        Args:
+            image_urls: List of image URLs
+            context: Video context (duration, resolution, etc.)
+            
+        Returns:
+            List of message dicts
+        """
+        # 使用用户提供的完整提示词
+        system_content = """你是一位专业的素材分析师和内容标签专家。你的任务是基于一系列视频抽帧图片，对该素材片段进行细致的、聚焦于画面和情感的分析。你需要将所有抽帧作为一个整体，理解素材的核心内容、视觉特征以及情绪氛围，并严格按照提供的 JSON 格式输出结果。
+
+请对输入的图片序列进行分析，并生成以下字段的内容：
+
+1. Main Subject (核心主体): 简短精准地描述画面最主要的焦点物体或人物。
+2. Action or Event (动作或事件): 描述素材中发生的核心动态或静态事件。
+3. Scene Setting (场景设置): 详细描述地点（如：城市高楼顶部的户外，深夜）、环境光照等。
+4. Visual Style (视觉风格): 提取素材的拍摄技巧和画面质感（如：特写、手持镜头抖动、高饱和度）。
+5. Color Palette (色彩基调): 描述画面主要的色彩倾向。
+6. Emotion Dominant (主导情感): **只使用一个词汇**总结素材传达的最强烈的情绪（如：'平静'）。
+7. Atmosphere Tags (氛围标签): 列出 3-5 个用于描述素材整体氛围的标签（如：'治愈'，'浪漫'，'未来主义'）。
+8. **Viral Meme Tags (网络热梗标签):** 基于画面内容、主题或风格，识别素材是否属于当前流行的**网络热梗、挑战或病毒式传播的趋势**。列出 3-5 个具体的热梗名称或核心概念。如果素材内容与任何流行热梗无关，则返回空列表 `[]`。
+9. Keywords (关键词): 提取 5-10 个高度相关的检索关键词，包括所有关键名词和核心形容词。
+
+【注意】你的分析必须基于视觉信息，不要进行任何市场营销或文案总结。
+
+你的最终输出必须是一个完整的 JSON 对象，并且严格匹配以下 Python Pydantic 模型的结构。不要在 JSON 之外输出任何解释、注释、markdown 块或代码块。
+
+JSON Schema:
+{
+    "main_subject": "string",
+    "action_or_event": "string",
+    "scene_setting": "string",
+    "visual_style": "string",
+    "color_palette": "string",
+    "emotion_dominant": "string",
+    "atmosphere_tags": ["string"],
+    "viral_meme_tags": ["string"],
+    "keywords": ["string"]
+}"""
+        
+        # Build user prompt
+        user_parts = []
+        
+        # Add context if provided
+        if context:
+            context_text = "**视频信息：**\n"
+            if context.get("duration"):
+                context_text += f"- 时长：{context['duration']:.1f}秒\n"
+            if context.get("resolution"):
+                context_text += f"- 分辨率：{context['resolution']}\n"
+            if context.get("frame_count"):
+                context_text += f"- 帧数量：{context['frame_count']}帧\n"
+            
+            user_parts.append({"type": "text", "text": context_text})
+        
+        # Add instruction
+        user_parts.append({
+            "type": "text",
+            "text": "请分析以下短视频抽帧序列（按时间顺序），严格按照上述JSON格式输出结果："
+        })
+        
+        # Add images
+        for idx, url in enumerate(image_urls):
+            user_parts.append({
+                "type": "image_url",
+                "image_url": {"url": url}
+            })
+        
+        messages = [
+            {"role": "system", "content": system_content},
+            {"role": "user", "content": user_parts}
+        ]
+        
+        return messages
+    
+    def _parse_short_video_tagging_response(self, response_data: Dict) -> ShortVideoTaggingResult:
+        """
+        解析短视频打标的 API 响应
+        
+        Args:
+            response_data: API response data
+            
+        Returns:
+            ShortVideoTaggingResult object
+        """
+        try:
+            # Extract content from response
+            if "choices" not in response_data or len(response_data["choices"]) == 0:
+                raise ValueError("No choices in response")
+            
+            content = response_data["choices"][0]["message"]["content"]
+            
+            # Try to parse as JSON
+            try:
+                # Find JSON block in markdown code block if present
+                if "```json" in content:
+                    json_start = content.find("```json") + 7
+                    json_end = content.find("```", json_start)
+                    json_str = content[json_start:json_end].strip()
+                elif "```" in content:
+                    json_start = content.find("```") + 3
+                    json_end = content.find("```", json_start)
+                    json_str = content[json_start:json_end].strip()
+                else:
+                    json_str = content
+                
+                parsed = json.loads(json_str)
+                
+                return ShortVideoTaggingResult(
+                    main_subject=parsed.get("main_subject", ""),
+                    action_or_event=parsed.get("action_or_event", ""),
+                    scene_setting=parsed.get("scene_setting", ""),
+                    visual_style=parsed.get("visual_style", ""),
+                    color_palette=parsed.get("color_palette", ""),
+                    emotion_dominant=parsed.get("emotion_dominant", ""),
+                    atmosphere_tags=parsed.get("atmosphere_tags", []) or [],
+                    viral_meme_tags=parsed.get("viral_meme_tags", []) or [],
+                    keywords=parsed.get("keywords", []) or []
+                )
+                
+            except json.JSONDecodeError as e:
+                logger.error(f"JSON decode error: {e}, content: {content}")
+                # If not valid JSON, create a fallback result
+                logger.warning("Response is not valid JSON, creating fallback result")
+                return ShortVideoTaggingResult(
+                    main_subject="解析错误",
+                    action_or_event="无法解析响应内容",
+                    scene_setting="",
+                    visual_style="",
+                    color_palette="",
+                    emotion_dominant="未知",
+                    atmosphere_tags=[],
+                    viral_meme_tags=[],
+                    keywords=[]
+                )
+                
+        except Exception as e:
+            logger.error(f"Error parsing short video tagging response: {str(e)}")
             raise
 
 

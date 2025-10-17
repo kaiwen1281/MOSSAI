@@ -173,6 +173,34 @@ class AnalysisResult(BaseModel):
     raw_response: Optional[dict] = Field(None, description="原始AI响应")
 
 
+class ShortVideoTaggingResult(BaseModel):
+    """短视频素材打标结果"""
+    main_subject: str = Field(..., description="核心主体：简短精准地描述画面最主要的焦点物体或人物")
+    action_or_event: str = Field(..., description="动作或事件：描述素材中发生的核心动态或静态事件")
+    scene_setting: str = Field(..., description="场景设置：详细描述地点、环境光照等")
+    visual_style: str = Field(..., description="视觉风格：提取素材的拍摄技巧和画面质感")
+    color_palette: str = Field(..., description="色彩基调：描述画面主要的色彩倾向")
+    emotion_dominant: str = Field(..., description="主导情感：只使用一个词汇总结素材传达的最强烈的情绪")
+    atmosphere_tags: List[str] = Field(default_factory=list, description="氛围标签：3-5个用于描述素材整体氛围的标签")
+    viral_meme_tags: List[str] = Field(default_factory=list, description="网络热梗标签：3-5个具体的热梗名称或核心概念，无相关则为空列表")
+    keywords: List[str] = Field(default_factory=list, description="关键词：5-10个高度相关的检索关键词")
+    
+    class Config:
+        json_schema_extra = {
+            "example": {
+                "main_subject": "年轻女性",
+                "action_or_event": "在镜头前做手势舞蹈",
+                "scene_setting": "室内卧室，柔和自然光照",
+                "visual_style": "竖屏拍摄，近景特写，手持设备轻微抖动",
+                "color_palette": "暖色调为主，粉色和米白色",
+                "emotion_dominant": "活力",
+                "atmosphere_tags": ["青春", "活泼", "日常", "治愈"],
+                "viral_meme_tags": ["手势舞", "卧室挑战"],
+                "keywords": ["女性", "舞蹈", "手势", "卧室", "青春", "活力", "日常"]
+            }
+        }
+
+
 class ExtractFramesResponse(BaseModel):
     """Frame extraction completion response"""
     task_id: str
