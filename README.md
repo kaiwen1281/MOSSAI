@@ -358,19 +358,6 @@ MOSS-AI 是无状态服务，不操作数据库。所有必要信息通过API参
 
 OSS签名URL默认有效期为24小时，确保在有效期内完成分析。
 
-### 5. FFmpeg依赖
-
-GIF转MP4功能依赖FFmpeg。安装方法：
-
-```bash
-# macOS
-brew install ffmpeg
-
-# Ubuntu/Debian
-sudo apt-get install ffmpeg
-
-# CentOS/RHEL
-sudo yum install ffmpeg
 ```
 
 ## 开发指南
