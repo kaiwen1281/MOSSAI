@@ -19,6 +19,8 @@ class TaskStatus(str, Enum):
     PROCESSING = "processing"
     COMPLETED = "completed"
     FAILED = "failed"
+    RETRY = "retry"
+    CANCELLED = "cancelled"
 
 
 class MediaType(str, Enum):
@@ -90,6 +92,24 @@ class AnalyzeMediaRequest(BaseModel):
         }
 
 
+class VideoAnalysisRequest(BaseModel):
+    """Video analysis request - unified interface (4 required parameters)"""
+    moss_id: str = Field(..., description="MOSS系统视频ID")
+    brand_name: str = Field(..., description="品牌方名称")
+    media_id: str = Field(..., description="阿里云ICE媒资ID")
+    frame_level: FrameLevel = Field(..., description="抽帧等级: low/medium/high")
+    
+    class Config:
+        json_schema_extra = {
+            "example": {
+                "moss_id": "video_20231017_001",
+                "brand_name": "nike",
+                "media_id": "****0343c45e0ce64664a",
+                "frame_level": "medium"
+            }
+        }
+
+
 class ConvertGifRequest(BaseModel):
     """Request to convert GIF to MP4"""
     gif_url: HttpUrl = Field(..., description="GIF文件URL")
@@ -130,10 +150,15 @@ class TaskResponse(BaseModel):
 class TaskStatusResponse(BaseModel):
     """Task status query response"""
     task_id: str
+    moss_id: str = Field(..., description="MOSS视频ID")
+    brand_name: str = Field(..., description="品牌方名称")
+    media_id: str = Field(..., description="媒资ID")
+    frame_level: str = Field(..., description="抽帧等级")
     status: TaskStatus
     message: str
     progress: Optional[int] = Field(None, description="进度百分比（0-100）")
     result: Optional[dict] = Field(None, description="任务结果数据")
+    error_detail: Optional[dict] = Field(None, description="错误详情")
     created_at: datetime
     updated_at: datetime
     completed_at: Optional[datetime] = None
@@ -167,6 +192,26 @@ class AnalyzeResponse(BaseModel):
     analysis_result: AnalysisResult
     frame_count: int = Field(..., description="分析的帧数量")
     model_used: str = Field(..., description="使用的模型")
+
+
+class BatchTaskStatusRequest(BaseModel):
+    """Batch task status query request"""
+    task_ids: List[str] = Field(..., description="任务ID列表", max_length=50)
+    
+    class Config:
+        json_schema_extra = {
+            "example": {
+                "task_ids": ["task_001", "task_002", "task_003"]
+            }
+        }
+
+
+class BatchTaskStatusResponse(BaseModel):
+    """Batch task status query response"""
+    results: dict = Field(..., description="任务状态字典 {task_id: TaskStatusResponse}")
+    total: int = Field(..., description="查询总数")
+    found: int = Field(..., description="找到的任务数")
+    not_found: List[str] = Field(default_factory=list, description="未找到的任务ID列表")
 
 
 class ErrorResponse(BaseModel):

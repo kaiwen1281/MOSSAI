@@ -62,6 +62,16 @@ class Settings(BaseSettings):
     
     # Concurrency Control
     max_concurrent_tasks: int = 3
+    max_extraction_concurrent: int = 5  # 抽帧最大并发数
+    max_analysis_concurrent: int = 3    # AI分析最大并发数
+    
+    # Task Cleanup Configuration
+    task_cleanup_interval: int = 1800           # 清理检查间隔：30分钟（秒）
+    task_pending_timeout: int = 3600            # PENDING超时：1小时（秒）
+    task_processing_timeout: int = 7200         # PROCESSING超时：2小时（秒）
+    task_completed_retain: int = 172800         # 已完成任务保留：48小时（秒）
+    task_failed_retain: int = 172800            # 失败任务保留：48小时（秒）
+    max_tasks_in_memory: int = 1000             # 内存中最大任务数
     
     # Logging
     log_level: str = "INFO"

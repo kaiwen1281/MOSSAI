@@ -1,5 +1,6 @@
 """Main FastAPI application entry point"""
 import logging
+import asyncio
 from contextlib import asynccontextmanager
 
 from fastapi import FastAPI
@@ -7,7 +8,7 @@ from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import JSONResponse
 
 from app.core.config import settings
-from app.api.routes import router
+from app.api.routes import router, cleanup_old_tasks
 
 # Configure logging
 log_level = getattr(logging, settings.log_level.upper(), logging.INFO)
@@ -29,17 +30,22 @@ async def lifespan(app: FastAPI):
     logger.info(f"Starting {settings.app_name} v{settings.app_version}")
     logger.info(f"Debug mode: {settings.debug}")
     
-    # Check ffmpeg availability
-    from app.utils.media_converter import media_converter
-    if media_converter.check_ffmpeg_available():
-        logger.info("FFmpeg is available")
-    else:
-        logger.warning("FFmpeg is not available - GIF conversion may not work")
+    # Start background cleanup task
+    cleanup_task = asyncio.create_task(cleanup_old_tasks())
+    logger.info("Memory cleanup task started")
     
     yield
     
     # Shutdown
     logger.info(f"Shutting down {settings.app_name}")
+    
+    # Cancel cleanup task
+    cleanup_task.cancel()
+    try:
+        await cleanup_task
+    except asyncio.CancelledError:
+        logger.info("Memory cleanup task stopped")
+        pass
 
 
 # Create FastAPI app
@@ -50,10 +56,10 @@ app = FastAPI(
     MOSS-AI - Video Frame Extraction and Analysis Service
     
     This service provides:
-    - Frame extraction from videos using Aliyun ICE
+    - Frame extraction from videos using Aliyun OSS real-time processing
     - AI-powered video content analysis using Doubao models
-    - Support for video, image, and GIF formats
-    - Intelligent and fixed-interval frame extraction
+    - Support for video and image analysis
+    - Intelligent concurrent task processing with automatic memory management
     """,
     lifespan=lifespan,
     docs_url="/docs",
