@@ -17,6 +17,8 @@ from app.models.schemas import (
     VideoAnalysisRequest,
     BatchTaskStatusRequest,
     BatchTaskStatusResponse,
+    ImageAnalysisRequest,
+    SingleImageTaggingResult,
 )
 from app.services.ice_client import ice_service
 from app.services.oss_client import oss_service
@@ -24,6 +26,91 @@ from app.services.doubao_client import doubao_service
 from app.core.config import settings
 
 logger = logging.getLogger(__name__)
+
+
+# ===== 错误分类映射 =====
+
+def classify_error(exception: Exception) -> tuple[str, str]:
+    """
+    分类异常，返回 (error_type, error_message)
+    
+    根据异常类型和消息内容，判断错误类型：
+    - 临时性错误：可以重试的错误（网络、超时、服务不可用等）
+    - 永久性错误：无法通过重试解决的错误（格式、内容、参数等）
+    
+    Returns:
+        (error_type: str, error_message: str)
+    """
+    error_str = str(exception).lower()
+    error_type_name = type(exception).__name__
+    
+    # AI服务相关错误
+    if "timeout" in error_str or "timed out" in error_str:
+        return ("ai_timeout", str(exception))
+    
+    if "rate limit" in error_str or "限流" in error_str or "429" in error_str:
+        return ("rate_limit_exceeded", str(exception))
+    
+    if "service unavailable" in error_str or "503" in error_str or "502" in error_str:
+        return ("ai_service_unavailable", str(exception))
+    
+    if "connection" in error_str or "网络" in error_str:
+        return ("network_error", str(exception))
+    
+    # 内容相关错误
+    if "sensitive" in error_str or "敏感" in error_str:
+        return ("sensitive_content", str(exception))
+    
+    if "complex" in error_str or "复杂" in error_str:
+        return ("content_too_complex", str(exception))
+    
+    # 视频相关错误
+    if "format" in error_str and ("video" in error_str or "视频" in error_str):
+        return ("video_format_unsupported", str(exception))
+    
+    if "corrupt" in error_str or "损坏" in error_str:
+        if "video" in error_str or "视频" in error_str:
+            return ("video_corrupted", str(exception))
+        elif "image" in error_str or "图片" in error_str:
+            return ("image_corrupted", str(exception))
+    
+    if "too short" in error_str or "过短" in error_str:
+        return ("video_too_short", str(exception))
+    
+    if "too long" in error_str or "过长" in error_str:
+        return ("video_too_long", str(exception))
+    
+    # 抽帧相关错误
+    if "frame" in error_str and "extract" in error_str:
+        if "timeout" in error_str:
+            return ("frame_extraction_timeout", str(exception))
+        return ("frame_extraction_failed", str(exception))
+    
+    if "未提取到任何帧" in error_str or "抽帧失败" in error_str:
+        return ("frame_extraction_failed", str(exception))
+    
+    # 图片相关错误
+    if "format" in error_str and ("image" in error_str or "图片" in error_str):
+        return ("image_format_unsupported", str(exception))
+    
+    if "resolution" in error_str and "low" in error_str:
+        return ("image_resolution_too_low", str(exception))
+    
+    if "thumbnail" in error_str or "缩略图" in error_str:
+        return ("thumbnail_generation_failed", str(exception))
+    
+    # 媒资相关错误
+    if "media" in error_str or "媒资" in error_str:
+        if "not found" in error_str or "未找到" in error_str:
+            return ("media_not_found", str(exception))
+        return ("ice_media_not_ready", str(exception))
+    
+    # 参数相关错误
+    if "parameter" in error_str or "参数" in error_str or isinstance(exception, (ValueError, ValidationError)):
+        return ("invalid_parameters", str(exception))
+    
+    # 默认为AI服务错误（临时性，可重试）
+    return ("ai_service_error", str(exception))
 
 
 # Concurrency control manager
@@ -407,16 +494,21 @@ async def process_video_analysis_task(
     except Exception as e:
         logger.error(f"[{task_id}] Error in video analysis: {str(e)}", exc_info=True)
         
+        # 分类错误
+        error_type, error_message = classify_error(e)
+        
         # 记录失败信息
         task_data = tasks_storage.get(task_id, {})
         task_data["status"] = TaskStatus.FAILED
-        task_data["message"] = f"任务失败: {str(e)}"
+        task_data["message"] = f"任务失败: {error_message}"
         task_data["error_detail"] = {
-            "error_type": type(e).__name__,
-            "error_message": str(e),
+            "error_type": error_type,
+            "error_message": error_message,
         }
         task_data["updated_at"] = datetime.now()
         task_data["failed_at"] = datetime.now()
+        
+        logger.info(f"[{task_id}] Classified error - type: {error_type}, message: {error_message}")
         
         # 确保释放所有资源
         try:
@@ -593,6 +685,205 @@ async def cleanup_old_tasks():
         
         except Exception as e:
             logger.error(f"Error in cleanup task: {e}")
+
+
+# ============================================================================
+# IMAGE ANALYSIS API
+# ============================================================================
+
+@router.post(
+    "/api/analyze-image",
+    response_model=TaskResponse,
+    status_code=status.HTTP_202_ACCEPTED,
+    tags=["Image Analysis"]
+)
+async def analyze_image(
+    request: ImageAnalysisRequest,
+    background_tasks: BackgroundTasks
+) -> TaskResponse:
+    """
+    单张图片打标接口 - 生成缩略图 + AI打标分析（立即返回task_id）
+    
+    必需参数：
+    - **moss_id**: MOSS系统图片ID
+    - **brand_name**: 品牌方名称
+    - **media_id**: 阿里云ICE媒资ID
+    
+    工作流程：
+    1. 立即返回 task_id
+    2. 后台执行：获取媒资信息 → 生成缩略图 → 图片打标分析
+    3. MOSS 轮询查询状态：GET /api/task/{task_id}
+    """
+    try:
+        # 生成唯一任务ID
+        import secrets
+        task_id = f"image_analysis_{int(datetime.now().timestamp())}_{secrets.token_hex(4)}"
+        
+        # 初始化任务数据
+        task_data = {
+            "task_id": task_id,
+            "moss_id": request.moss_id,
+            "brand_name": request.brand_name,
+            "media_id": request.media_id,
+            "status": TaskStatus.PENDING,
+            "message": "任务已提交，等待处理",
+            "progress": 0,
+            "created_at": datetime.now(),
+            "updated_at": datetime.now(),
+            "result": None,
+            "error_detail": None
+        }
+        
+        # 存储任务
+        tasks_storage[task_id] = task_data
+        
+        # 提交后台任务
+        background_tasks.add_task(
+            process_image_analysis_task,
+            task_id,
+            request
+        )
+        
+        logger.info(
+            f"Image analysis task {task_id} submitted: "
+            f"moss_id={request.moss_id}, media_id={request.media_id}"
+        )
+        
+        return TaskResponse(
+            task_id=task_id,
+            status=TaskStatus.PENDING,
+            message="任务已提交，请使用 task_id 查询处理状态",
+            created_at=datetime.now()
+        )
+        
+    except Exception as e:
+        logger.error(f"Error submitting image analysis: {str(e)}")
+        raise HTTPException(
+            status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
+            detail=f"提交图片分析任务失败: {str(e)}"
+        )
+
+
+async def process_image_analysis_task(
+    task_id: str,
+    request: ImageAnalysisRequest
+):
+    """
+    处理图片分析任务
+    完整流程：获取媒资信息 → 生成缩略图 → AI分析
+    """
+    task_data = tasks_storage.get(task_id)
+    if not task_data:
+        logger.error(f"Task {task_id} not found in storage")
+        return
+    
+    try:
+        # ========== 阶段1: 获取媒资信息 ==========
+        task_data["status"] = TaskStatus.PROCESSING
+        task_data["message"] = "正在获取图片信息..."
+        task_data["progress"] = 10
+        task_data["updated_at"] = datetime.now()
+        
+        logger.info(f"[{task_id}] Getting media info for: {request.media_id}")
+        media_info = ice_service.get_media_info(request.media_id)
+        
+        if not media_info:
+            raise ValueError("无法获取媒资信息")
+        
+        image_oss_path = media_info.get("file_url")
+        if not image_oss_path:
+            raise ValueError("媒资文件URL为空")
+        
+        # 去掉URL编码
+        image_oss_path = unquote(image_oss_path)
+        
+        # ========== 阶段2: 生成缩略图 ==========
+        task_data["message"] = "正在生成缩略图..."
+        task_data["progress"] = 30
+        task_data["updated_at"] = datetime.now()
+        
+        logger.info(f"[{task_id}] Generating thumbnail for: {image_oss_path}")
+        thumbnail_url = oss_service.generate_image_thumbnail(
+            image_oss_path=image_oss_path,
+            quality=90,
+            max_width=1280,
+            max_height=1280
+        )
+        
+        # ========== 阶段3: AI图片打标分析 ==========  
+        task_data["message"] = "正在进行AI图片打标分析..."
+        task_data["progress"] = 60
+        task_data["updated_at"] = datetime.now()
+        
+        logger.info(f"[{task_id}] Analyzing image for tagging")
+        
+        # 使用新的图片打标分析功能
+        tagging_result = await doubao_service.analyze_single_image_tagging(
+            image_url=thumbnail_url
+        )
+        
+        # 确保所有列表字段都不为None，始终返回空列表而不是null
+        def ensure_list(value):
+            """确保值是列表，如果是None则返回空列表"""
+            if value is None:
+                return []
+            if isinstance(value, list):
+                return value
+            return []
+        
+        # 构建安全的tagging数据
+        safe_atmosphere_tags = ensure_list(tagging_result.atmosphere_tags)
+        safe_viral_meme_tags = ensure_list(tagging_result.viral_meme_tags)
+        safe_keywords = ensure_list(tagging_result.keywords)
+        
+        # 构建完整结果
+        task_data["status"] = TaskStatus.COMPLETED
+        task_data["message"] = "图片打标分析完成"
+        task_data["progress"] = 100
+        task_data["result"] = {
+            "moss_id": request.moss_id,
+            "brand_name": request.brand_name,
+            "media_id": request.media_id,
+            "tagging": {
+                "main_subject": tagging_result.main_subject or "",
+                "subject_state": tagging_result.subject_state or "",
+                "scene_setting": tagging_result.scene_setting or "",
+                "composition_style": tagging_result.composition_style or "",
+                "color_lighting": tagging_result.color_lighting or "",
+                "emotion_dominant": tagging_result.emotion_dominant or "",
+                "atmosphere_tags": safe_atmosphere_tags,
+                "viral_meme_tags": safe_viral_meme_tags,
+                "keywords": safe_keywords
+            },
+            "metadata": {
+                "image_resolution": media_info.get("resolution"),
+                "model_used": settings.doubao_model,
+                "analysis_type": "single_image_tagging",
+                "thumbnail_url": thumbnail_url
+            }
+        }
+        task_data["completed_at"] = datetime.now()
+        task_data["updated_at"] = datetime.now()
+        
+        logger.info(f"[{task_id}] Image analysis completed successfully")
+        
+    except Exception as e:
+        logger.error(f"[{task_id}] Error in image analysis: {str(e)}", exc_info=True)
+        
+        # 分类错误
+        error_type, error_message = classify_error(e)
+        
+        task_data["status"] = TaskStatus.FAILED
+        task_data["message"] = f"图片分析失败: {error_message}"
+        task_data["progress"] = 0
+        task_data["error_detail"] = {
+            "error_type": error_type,
+            "error_message": error_message
+        }
+        task_data["updated_at"] = datetime.now()
+        task_data["failed_at"] = datetime.now()
+        
+        logger.info(f"[{task_id}] Classified error - type: {error_type}, message: {error_message}")
 
 
 # Export cleanup function for use in main.py

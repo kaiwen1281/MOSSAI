@@ -249,3 +249,47 @@ class ErrorResponse(BaseModel):
     detail: Optional[str] = Field(None, description="详细错误信息")
     timestamp: datetime = Field(default_factory=datetime.now)
 
+
+class SingleImageTaggingResult(BaseModel):
+    """单张图片打标结果"""
+    main_subject: str = Field(..., description="核心主体：简短精准地描述画面最主要的焦点物体或人物")
+    subject_state: str = Field(..., description="主体状态：描述核心主体所处的具体动作或状态")
+    scene_setting: str = Field(..., description="场景设置：详细描述地点、环境、时间等背景信息")
+    composition_style: str = Field(..., description="构图与风格：提取图片的构图方式和拍摄角度特点")
+    color_lighting: str = Field(..., description="色彩与光线：描述画面主要的色彩倾向和光线类型")
+    emotion_dominant: str = Field(..., description="主导情感：只使用一个词汇总结图片传达的最强烈的情绪")
+    atmosphere_tags: List[str] = Field(default_factory=list, description="氛围标签：3-5个用于描述图片整体氛围的标签")
+    viral_meme_tags: List[str] = Field(default_factory=list, description="网络热梗标签：3-5个具体的热梗名称或核心概念，无相关则为空列表")
+    keywords: List[str] = Field(default_factory=list, description="关键词：5-10个高度相关的检索关键词")
+    
+    class Config:
+        json_schema_extra = {
+            "example": {
+                "main_subject": "年轻女性",
+                "subject_state": "微笑着看向镜头",
+                "scene_setting": "室内咖啡厅，温暖的下午光线",
+                "composition_style": "中景人像，三分法构图",
+                "color_lighting": "暖色调，柔和自然光",
+                "emotion_dominant": "愉悦",
+                "atmosphere_tags": ["温馨", "休闲", "文艺", "舒适"],
+                "viral_meme_tags": ["咖啡文化", "都市生活"],
+                "keywords": ["女性", "咖啡厅", "微笑", "室内", "温暖", "休闲", "都市"]
+            }
+        }
+
+
+class ImageAnalysisRequest(BaseModel):
+    """单张图片分析请求"""
+    moss_id: str = Field(..., description="MOSS系统中的图片ID")
+    brand_name: str = Field(..., description="品牌方名称")
+    media_id: str = Field(..., description="阿里云ICE媒资ID")
+    
+    class Config:
+        json_schema_extra = {
+            "example": {
+                "moss_id": "image_20231017_001",
+                "brand_name": "nike",
+                "media_id": "****0343c45e0ce64664a"
+            }
+        }
+

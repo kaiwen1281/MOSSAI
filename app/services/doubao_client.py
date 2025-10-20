@@ -6,7 +6,7 @@ import json
 import httpx
 
 from app.core.config import settings
-from app.models.schemas import AnalysisResult, ShortVideoTaggingResult
+from app.models.schemas import AnalysisResult, ShortVideoTaggingResult, SingleImageTaggingResult
 
 logger = logging.getLogger(__name__)
 
@@ -613,6 +613,140 @@ JSON Schema:
         except Exception as e:
             logger.error(f"Error parsing short video tagging response: {str(e)}")
             raise
+
+    def _build_single_image_tagging_messages(self, image_url: str) -> List[Dict]:
+        """构建单张图片打标的消息"""
+        system_prompt = """你是一位专业的图片分析师和视觉标签专家。你的任务是基于输入的单张图片，进行细致的、聚焦于画面和情感的分析。你需要严格按照提供的 JSON 格式输出结果。
+
+请对输入的图片进行分析，并生成以下字段的内容：
+
+1. Main Subject (核心主体): 简短精准地描述画面最主要的焦点物体或人物。
+2. Subject State (主体状态): 描述核心主体所处的具体动作或状态。
+3. Scene Setting (场景设置): 详细描述地点、环境、时间等背景信息。
+4. Composition Style (构图与风格): 提取图片的构图方式和拍摄角度特点。
+5. Color Lighting (色彩与光线): 描述画面主要的色彩倾向和光线类型（如硬光、柔光）。
+6. Emotion Dominant (主导情感): **只使用一个词汇**总结图片传达的最强烈的情绪（如：'平静'）。
+7. Atmosphere Tags (氛围标签): 列出 3-5 个用于描述图片整体氛围的标签。
+8. **Viral Meme Tags (网络热梗标签):** 分析图片是否紧密关联当前流行的**网络热梗、视觉梗或社交挑战**。列出 3-5 个具体的热梗名称或核心概念。如果图片与任何流行热梗无关，则返回空列表 `[]`。
+9. Keywords (关键词): 提取 5-10 个高度相关的检索关键词，包括所有关键名词和核心形容词。
+
+【注意】你的分析必须完全基于视觉信息，不要进行任何超出图片内容的推测或描述。
+
+你的最终输出必须是一个完整的 JSON 对象，并且严格匹配以下 Python Pydantic 模型的结构。不要在 JSON 之外输出任何解释、注释、markdown 块或代码块。
+
+JSON Schema:
+{
+    "main_subject": "string",
+    "subject_state": "string", 
+    "scene_setting": "string",
+    "composition_style": "string",
+    "color_lighting": "string",
+    "emotion_dominant": "string",
+    "atmosphere_tags": ["string"],
+    "viral_meme_tags": ["string"],
+    "keywords": ["string"]
+}"""
+
+        user_parts = [
+            {"type": "text", "text": "请按照上述要求分析这张图片："},
+            {"type": "image_url", "image_url": {"url": image_url}}
+        ]
+        
+        return [
+            {"role": "system", "content": system_prompt},
+            {"role": "user", "content": user_parts}
+        ]
+
+    def _parse_single_image_tagging_response(self, response_data: dict) -> SingleImageTaggingResult:
+        """解析单张图片打标的AI响应"""
+        try:
+            content = response_data["choices"][0]["message"]["content"]
+            logger.info(f"Raw AI response: {content[:200]}...")
+            
+            # 提取JSON内容
+            json_str = content
+            if "```json" in content:
+                json_start = content.find("```json") + 7
+                json_end = content.find("```", json_start)
+                json_str = content[json_start:json_end].strip()
+            elif "```" in content:
+                json_start = content.find("```") + 3
+                json_end = content.find("```", json_start)
+                json_str = content[json_start:json_end].strip()
+            else:
+                json_str = content
+            
+            parsed = json.loads(json_str)
+            
+            return SingleImageTaggingResult(
+                main_subject=parsed.get("main_subject", ""),
+                subject_state=parsed.get("subject_state", ""),
+                scene_setting=parsed.get("scene_setting", ""),
+                composition_style=parsed.get("composition_style", ""),
+                color_lighting=parsed.get("color_lighting", ""),
+                emotion_dominant=parsed.get("emotion_dominant", ""),
+                atmosphere_tags=parsed.get("atmosphere_tags", []) or [],
+                viral_meme_tags=parsed.get("viral_meme_tags", []) or [],
+                keywords=parsed.get("keywords", []) or []
+            )
+            
+        except json.JSONDecodeError as e:
+            logger.error(f"JSON decode error: {e}, content: {content}")
+            logger.warning("Response is not valid JSON, creating fallback result")
+            return SingleImageTaggingResult(
+                main_subject="解析错误",
+                subject_state="无法解析响应内容",
+                scene_setting="",
+                composition_style="",
+                color_lighting="",
+                emotion_dominant="未知",
+                atmosphere_tags=[],
+                viral_meme_tags=[],
+                keywords=[]
+            )
+        except Exception as e:
+            logger.error(f"Error parsing single image tagging response: {str(e)}")
+            raise
+
+    async def analyze_single_image_tagging(
+        self,
+        image_url: str
+    ) -> SingleImageTaggingResult:
+        """
+        专门用于单张图片打标的分析
+        
+        Args:
+            image_url: 图片URL
+            
+        Returns:
+            SingleImageTaggingResult: 图片打标结果
+        """
+        try:
+            messages = self._build_single_image_tagging_messages(image_url)
+            
+            logger.info(f"Starting single image tagging analysis for: {image_url}")
+            
+            response_data = await self._call_api(messages)
+            result = self._parse_single_image_tagging_response(response_data)
+            
+            logger.info("Single image tagging analysis completed successfully")
+            return result
+            
+        except Exception as e:
+            logger.error(f"Error in single image tagging analysis: {str(e)}")
+            # 返回fallback结果而不是抛出异常
+            fallback = SingleImageTaggingResult(
+                main_subject="分析失败",
+                subject_state="系统错误",
+                scene_setting="",
+                composition_style="",
+                color_lighting="",
+                emotion_dominant="未知",
+                atmosphere_tags=[],
+                viral_meme_tags=[],
+                keywords=[]
+            )
+            return fallback
 
 
 # Global service instance

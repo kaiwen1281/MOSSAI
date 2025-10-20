@@ -413,6 +413,52 @@ class OSSService:
             logger.error(f"Error generating video snapshot URL: {str(e)}")
             raise
 
+    def generate_image_thumbnail(
+        self,
+        image_oss_path: str,
+        quality: int = 90,
+        max_width: int = 1280,
+        max_height: int = 1280
+    ) -> str:
+        """
+        生成图片缩略图URL
+        
+        Args:
+            image_oss_path: 图片在OSS中的路径（不含bucket）
+            quality: 图片质量 (1-100)
+            max_width: 最大宽度
+            max_height: 最大高度
+            
+        Returns:
+            缩略图访问URL
+        """
+        try:
+            # 构建阿里云OSS图片处理参数
+            # 使用resize参数保持高质量，w和h为最大宽高限制，m_lfit表示等比缩放不超过限制
+            process_params = f"image/resize,m_lfit,w_{max_width},h_{max_height}/quality,q_{quality}"
+            
+            # 构建查询参数
+            params = {
+                'x-oss-process': process_params,
+                'response-content-disposition': 'inline'
+            }
+            
+            # 生成签名URL
+            thumbnail_url = self.bucket.sign_url(
+                'GET',
+                image_oss_path,
+                settings.aliyun_oss_url_expire,
+                slash_safe=True,
+                params=params
+            )
+            
+            logger.info(f"Generated thumbnail URL for image: {image_oss_path}")
+            return thumbnail_url
+            
+        except Exception as e:
+            logger.error(f"Error generating thumbnail for {image_oss_path}: {str(e)}")
+            raise ValueError(f"缩略图生成失败: {str(e)}")
+
 
 # Global service instance
 oss_service = OSSService()

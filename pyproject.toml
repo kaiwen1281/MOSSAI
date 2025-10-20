@@ -1,8 +1,8 @@
 [project]
 name = "moss-ai"
 version = "0.1.0"
-description = "Add your description here"
-requires-python = ">=3.13"
+description = "MOSS-AI - Video Frame Extraction and Analysis Service"
+requires-python = ">=3.10"
 dependencies = [
     "alibabacloud-ice20201109>=6.6.1",
     "fastapi>=0.119.0",
