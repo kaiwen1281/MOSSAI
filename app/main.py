@@ -1,5 +1,4 @@
 """Main FastAPI application entry point"""
-import logging
 import asyncio
 from contextlib import asynccontextmanager
 
@@ -8,19 +7,11 @@ from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import JSONResponse
 
 from app.core.config import settings
+from app.core.logging import setup_logging  # 新的日志系统
 from app.api.routes import router, cleanup_old_tasks
 
-# Configure logging
-log_level = getattr(logging, settings.log_level.upper(), logging.INFO)
-if settings.debug:
-    log_level = logging.DEBUG
-
-logging.basicConfig(
-    level=log_level,
-    format='%(asctime)s - %(name)s - %(levelname)s - %(message)s'
-)
-
-logger = logging.getLogger(__name__)
+# 初始化日志系统
+logger = setup_logging()
 
 
 @asynccontextmanager
@@ -34,10 +25,30 @@ async def lifespan(app: FastAPI):
     cleanup_task = asyncio.create_task(cleanup_old_tasks())
     logger.info("Memory cleanup task started")
     
+    # Start scheduled cleanup service (日志清理等)
+    try:
+        from app.core.scheduled_cleanup import start_scheduled_cleanup_service
+        await start_scheduled_cleanup_service(
+            hour=2,  # 每天凌晨2点执行
+            minute=0,
+            log_retention_days=7,  # 日志保留7天
+        )
+        logger.info("✅ Scheduled cleanup service started")
+    except Exception as e:
+        logger.error(f"Failed to start scheduled cleanup service: {e}")
+    
     yield
     
     # Shutdown
     logger.info(f"Shutting down {settings.app_name}")
+    
+    # Stop scheduled cleanup service
+    try:
+        from app.core.scheduled_cleanup import stop_scheduled_cleanup_service
+        await stop_scheduled_cleanup_service()
+        logger.info("Scheduled cleanup service stopped")
+    except Exception as e:
+        logger.error(f"Failed to stop scheduled cleanup service: {e}")
     
     # Cancel cleanup task
     cleanup_task.cancel()
