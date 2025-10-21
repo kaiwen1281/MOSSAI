@@ -794,21 +794,14 @@ async def process_image_analysis_task(
         if not image_oss_path:
             raise ValueError("媒资文件URL为空")
         
-        # 去掉URL编码
-        image_oss_path = unquote(image_oss_path)
+        # 去掉URL编码（直接使用原图URL，不再生成缩略图）
+        image_url = unquote(image_oss_path)
         
-        # ========== 阶段2: 生成缩略图 ==========
-        task_data["message"] = "正在生成缩略图..."
+        # ========== 阶段2: 准备图片URL ==========
+        task_data["message"] = "正在准备图片URL..."
         task_data["progress"] = 30
         task_data["updated_at"] = datetime.now()
-        
-        logger.info(f"[{task_id}] Generating thumbnail for: {image_oss_path}")
-        thumbnail_url = oss_service.generate_image_thumbnail(
-            image_oss_path=image_oss_path,
-            quality=90,
-            max_width=1280,
-            max_height=1280
-        )
+        logger.info(f"[{task_id}] Using original image url for analysis")
         
         # ========== 阶段3: AI图片打标分析 ==========  
         task_data["message"] = "正在进行AI图片打标分析..."
@@ -817,8 +810,8 @@ async def process_image_analysis_task(
         
         logger.info(f"[{task_id}] Analyzing image for tagging")
         
-        # 使用增强兜底流程的图片打标分析（已内置严格/宽松重试与最小可写库结果）
-        tagging_result = await doubao_service.analyze_single_image_tagging(image_url=thumbnail_url)
+        # 使用原图URL进行图片打标分析（不再生成缩略图）
+        tagging_result = await doubao_service.analyze_single_image_tagging(image_url=image_url)
         
         # 确保所有列表字段都不为None，始终返回空列表而不是null
         def ensure_list(value):
@@ -857,7 +850,7 @@ async def process_image_analysis_task(
                 "image_resolution": media_info.get("resolution"),
                 "model_used": settings.doubao_model,
                 "analysis_type": "single_image_tagging",
-                "thumbnail_url": thumbnail_url
+                "thumbnail_url": image_url
             }
         }
         task_data["completed_at"] = datetime.now()
