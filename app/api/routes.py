@@ -794,8 +794,8 @@ async def process_image_analysis_task(
         if not image_oss_path:
             raise ValueError("媒资文件URL为空")
         
-        # 去掉URL编码（直接使用原图URL，不再生成缩略图）
-        image_url = unquote(image_oss_path)
+        # 直接使用原图的签名URL（不要解码，否则会破坏签名导致403）
+        image_url = image_oss_path
         
         # ========== 阶段2: 准备图片URL ==========
         task_data["message"] = "正在准备图片URL..."
