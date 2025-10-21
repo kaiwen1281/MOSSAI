@@ -684,9 +684,11 @@ JSON Schema:
         ]
 
     def _build_single_image_tagging_messages_coarse(self, image_url: str) -> List[Dict]:
-        """更宽松的提示词：尽量从视觉给出简短描述，仍需返回规范 JSON。"""
+        """更宽松的提示词：从视觉给出简短描述，尽可能填入对应 JSON 键，仍需返回规范 JSON。"""
         system_prompt = (
-            "你只根据图片视觉信息做简短客观描述。必须返回 JSON，字段缺失时文本为\"\"，列表为 []。"
+            "你仅基于图片视觉内容进行客观描述。必须返回一个 JSON 对象；无法确定时，文本字段用空字符串\"\"，列表字段用 []。"
+            "请尽可能把信息归类到指定的 JSON 键（main_subject/subject_state/scene_setting/\n"
+            "composition_style/color_lighting/emotion_dominant/atmosphere_tags/viral_meme_tags/keywords）。"
         )
         user_parts = [
             {"type": "text", "text": "用最直观的词汇填充各字段，无法确定时留空字符串或空数组："},
@@ -818,25 +820,13 @@ JSON Schema:
             except Exception as e:
                 logger.warning(f"Primary attempt failed: {e}")
 
-            # 第二次：严格提示词
-            try:
-                response_data2 = await self._call_api(self._build_single_image_tagging_messages_strict(image_url))
-                result2 = self._parse_single_image_tagging_response(response_data2)
-                result2 = self._sanitize_single_image_result(result2)
-                if not self._is_invalid_single_image_result(result2):
-                    logger.info("Single image tagging analysis completed successfully (strict)")
-                    return result2
-                logger.warning("Strict image tagging result invalid, trying coarse prompt...")
-            except Exception as e2:
-                logger.warning(f"Strict attempt failed: {e2}")
-
-            # 第三次：宽松提示词（兜底）
+            # 第二次：宽松提示词（兜底）
             try:
                 response_data3 = await self._call_api(self._build_single_image_tagging_messages_coarse(image_url))
                 result3 = self._parse_single_image_tagging_response(response_data3)
                 result3 = self._sanitize_single_image_result(result3)
                 if not self._is_invalid_single_image_result(result3):
-                    logger.info("Single image tagging analysis completed successfully (coarse)")
+                    logger.info("Single image tagging analysis completed successfully (coarse fallback)")
                     return result3
             except Exception as e3:
                 logger.warning(f"Coarse attempt failed: {e3}")
