@@ -657,6 +657,89 @@ JSON Schema:
             {"role": "user", "content": user_parts}
         ]
 
+    def _build_single_image_tagging_messages_strict(self, image_url: str) -> List[Dict]:
+        """严格提示词：只允许返回纯 JSON，对未知字段用空字符串或空列表。"""
+        system_prompt = (
+            "你是图片标签生成器。严格、唯一输出一个 JSON 对象，且字段必须完整，"
+            "文本字段未知则为空字符串\"\"，列表字段未知则为 []，禁止任何解释或 Markdown。\n\n"
+            "JSON Schema:{\n"
+            "  \"main_subject\": \"string\",\n"
+            "  \"subject_state\": \"string\",\n"
+            "  \"scene_setting\": \"string\",\n"
+            "  \"composition_style\": \"string\",\n"
+            "  \"color_lighting\": \"string\",\n"
+            "  \"emotion_dominant\": \"string\",\n"
+            "  \"atmosphere_tags\": [\"string\"],\n"
+            "  \"viral_meme_tags\": [\"string\"],\n"
+            "  \"keywords\": [\"string\"]\n"
+            "}"
+        )
+        user_parts = [
+            {"type": "text", "text": "仅输出上述结构的 JSON 对象，不要包含解释："},
+            {"type": "image_url", "image_url": {"url": image_url}}
+        ]
+        return [
+            {"role": "system", "content": system_prompt},
+            {"role": "user", "content": user_parts}
+        ]
+
+    def _build_single_image_tagging_messages_coarse(self, image_url: str) -> List[Dict]:
+        """更宽松的提示词：尽量从视觉给出简短描述，仍需返回规范 JSON。"""
+        system_prompt = (
+            "你只根据图片视觉信息做简短客观描述。必须返回 JSON，字段缺失时文本为\"\"，列表为 []。"
+        )
+        user_parts = [
+            {"type": "text", "text": "用最直观的词汇填充各字段，无法确定时留空字符串或空数组："},
+            {"type": "image_url", "image_url": {"url": image_url}}
+        ]
+        return [
+            {"role": "system", "content": system_prompt},
+            {"role": "user", "content": user_parts}
+        ]
+
+    @staticmethod
+    def _sanitize_single_image_result(result: SingleImageTaggingResult) -> SingleImageTaggingResult:
+        """统一将 None→空字符串/空数组，并清理失败占位词。"""
+        def s(v: Optional[str]) -> str:
+            if v is None:
+                return ""
+            bad = {"分析失败", "解析错误", "系统错误", "未知"}
+            return "" if v.strip() in bad else v
+        def l(v):
+            if isinstance(v, list):
+                return v
+            return []
+        return SingleImageTaggingResult(
+            main_subject=s(getattr(result, "main_subject", "")),
+            subject_state=s(getattr(result, "subject_state", "")),
+            scene_setting=s(getattr(result, "scene_setting", "")),
+            composition_style=s(getattr(result, "composition_style", "")),
+            color_lighting=s(getattr(result, "color_lighting", "")),
+            emotion_dominant=s(getattr(result, "emotion_dominant", "")),
+            atmosphere_tags=l(getattr(result, "atmosphere_tags", [])),
+            viral_meme_tags=l(getattr(result, "viral_meme_tags", [])),
+            keywords=l(getattr(result, "keywords", [])),
+        )
+
+    @staticmethod
+    def _is_invalid_single_image_result(result: SingleImageTaggingResult) -> bool:
+        """判定首响应是否不可用。"""
+        bad_texts = {"分析失败", "解析错误", "系统错误"}
+        texts = [
+            result.main_subject.strip() if result.main_subject else "",
+            result.subject_state.strip() if result.subject_state else "",
+            result.emotion_dominant.strip() if result.emotion_dominant else "",
+        ]
+        # 典型失败占位词或几乎完全为空
+        if any(t in bad_texts for t in texts):
+            return True
+        if all(t == "" for t in [
+            result.main_subject, result.subject_state, result.scene_setting,
+            result.composition_style, result.color_lighting, result.emotion_dominant
+        ]):
+            return True
+        return False
+
     def _parse_single_image_tagging_response(self, response_data: dict) -> SingleImageTaggingResult:
         """解析单张图片打标的AI响应"""
         try:
@@ -722,31 +805,73 @@ JSON Schema:
             SingleImageTaggingResult: 图片打标结果
         """
         try:
-            messages = self._build_single_image_tagging_messages(image_url)
-            
             logger.info(f"Starting single image tagging analysis for: {image_url}")
-            
-            response_data = await self._call_api(messages)
-            result = self._parse_single_image_tagging_response(response_data)
-            
-            logger.info("Single image tagging analysis completed successfully")
-            return result
-            
-        except Exception as e:
-            logger.error(f"Error in single image tagging analysis: {str(e)}")
-            # 返回fallback结果而不是抛出异常
-            fallback = SingleImageTaggingResult(
-                main_subject="分析失败",
-                subject_state="系统错误",
-                scene_setting="",
-                composition_style="",
-                color_lighting="",
-                emotion_dominant="未知",
-                atmosphere_tags=[],
-                viral_meme_tags=[],
-                keywords=[]
+            # 第一次：常规提示词
+            try:
+                response_data = await self._call_api(self._build_single_image_tagging_messages(image_url))
+                result = self._parse_single_image_tagging_response(response_data)
+                result = self._sanitize_single_image_result(result)
+                if not self._is_invalid_single_image_result(result):
+                    logger.info("Single image tagging analysis completed successfully (primary)")
+                    return result
+                logger.warning("Primary image tagging result invalid, trying strict prompt...")
+            except Exception as e:
+                logger.warning(f"Primary attempt failed: {e}")
+
+            # 第二次：严格提示词
+            try:
+                response_data2 = await self._call_api(self._build_single_image_tagging_messages_strict(image_url))
+                result2 = self._parse_single_image_tagging_response(response_data2)
+                result2 = self._sanitize_single_image_result(result2)
+                if not self._is_invalid_single_image_result(result2):
+                    logger.info("Single image tagging analysis completed successfully (strict)")
+                    return result2
+                logger.warning("Strict image tagging result invalid, trying coarse prompt...")
+            except Exception as e2:
+                logger.warning(f"Strict attempt failed: {e2}")
+
+            # 第三次：宽松提示词（兜底）
+            try:
+                response_data3 = await self._call_api(self._build_single_image_tagging_messages_coarse(image_url))
+                result3 = self._parse_single_image_tagging_response(response_data3)
+                result3 = self._sanitize_single_image_result(result3)
+                if not self._is_invalid_single_image_result(result3):
+                    logger.info("Single image tagging analysis completed successfully (coarse)")
+                    return result3
+            except Exception as e3:
+                logger.warning(f"Coarse attempt failed: {e3}")
+
+            # 最终兜底：最小可写库结果（空字符串与空数组）
+            logger.error("All attempts failed or invalid. Returning minimal valid result.")
+            return self._sanitize_single_image_result(
+                SingleImageTaggingResult(
+                    main_subject="",
+                    subject_state="",
+                    scene_setting="",
+                    composition_style="",
+                    color_lighting="",
+                    emotion_dominant="",
+                    atmosphere_tags=[],
+                    viral_meme_tags=[],
+                    keywords=[]
+                )
             )
-            return fallback
+        except Exception as e:
+            logger.error(f"Error in single image tagging analysis (unexpected): {str(e)}")
+            # 兜底：最小可写库结果
+            return self._sanitize_single_image_result(
+                SingleImageTaggingResult(
+                    main_subject="",
+                    subject_state="",
+                    scene_setting="",
+                    composition_style="",
+                    color_lighting="",
+                    emotion_dominant="",
+                    atmosphere_tags=[],
+                    viral_meme_tags=[],
+                    keywords=[]
+                )
+            )
 
 
 # Global service instance

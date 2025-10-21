@@ -817,10 +817,8 @@ async def process_image_analysis_task(
         
         logger.info(f"[{task_id}] Analyzing image for tagging")
         
-        # 使用新的图片打标分析功能
-        tagging_result = await doubao_service.analyze_single_image_tagging(
-            image_url=thumbnail_url
-        )
+        # 使用增强兜底流程的图片打标分析（已内置严格/宽松重试与最小可写库结果）
+        tagging_result = await doubao_service.analyze_single_image_tagging(image_url=thumbnail_url)
         
         # 确保所有列表字段都不为None，始终返回空列表而不是null
         def ensure_list(value):
@@ -836,7 +834,7 @@ async def process_image_analysis_task(
         safe_viral_meme_tags = ensure_list(tagging_result.viral_meme_tags)
         safe_keywords = ensure_list(tagging_result.keywords)
         
-        # 构建完整结果
+        # 构建完整结果（已确保所有字段非 None，列表为 []）
         task_data["status"] = TaskStatus.COMPLETED
         task_data["message"] = "图片打标分析完成"
         task_data["progress"] = 100
