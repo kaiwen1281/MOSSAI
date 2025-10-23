@@ -862,6 +862,245 @@ JSON Schema:
                     keywords=[]
                 )
             )
+    
+    async def analyze_video_with_transcript(
+        self,
+        frame_urls: List[str],
+        transcript: List[dict],
+        video_duration: float,
+        context: Optional[Dict] = None
+    ) -> Dict:
+        """
+        带字幕的视频分析：画面+语音联合分析，生成整体打标和时间轴片段
+        
+        Args:
+            frame_urls: 帧图片URL列表（按时间顺序）
+            transcript: 字幕片段列表，格式为 [{"start_time": 0.0, "end_time": 3.5, "text": "..."}, ...]
+            video_duration: 视频总时长（秒）
+            context: 视频上下文信息
+            
+        Returns:
+            {
+                "overall_tagging": ShortVideoTaggingResult,
+                "timeline_segments": List[TimelineSegmentTagging],
+                "metadata": dict
+            }
+        """
+        try:
+            logger.info(f"Starting video analysis with transcript: {len(frame_urls)} frames, {len(transcript)} segments")
+            
+            # 分批处理帧（每批10帧）
+            batch_size = 10
+            batches = []
+            
+            for i in range(0, len(frame_urls), batch_size):
+                batch_frames = frame_urls[i:i + batch_size]
+                
+                # 计算这批帧的时间范围
+                start_idx = i
+                end_idx = min(i + batch_size - 1, len(frame_urls) - 1)
+                
+                # 估算每帧的时间戳
+                frame_interval = video_duration / max(len(frame_urls), 1)
+                batch_start_time = start_idx * frame_interval
+                batch_end_time = end_idx * frame_interval
+                
+                # 找到这个时间段的字幕
+                batch_transcript = []
+                for seg in transcript:
+                    # 如果字幕片段与当前批次有重叠
+                    if seg["start_time"] <= batch_end_time and seg["end_time"] >= batch_start_time:
+                        batch_transcript.append(seg)
+                
+                # 合并字幕文本
+                batch_text = " ".join([seg["text"] for seg in batch_transcript])
+                
+                batches.append({
+                    "frames": batch_frames,
+                    "start_time": batch_start_time,
+                    "end_time": batch_end_time,
+                    "transcript": batch_text,
+                    "start_idx": start_idx,
+                    "end_idx": end_idx
+                })
+            
+            # 分析每个批次
+            timeline_segments = []
+            
+            for idx, batch in enumerate(batches):
+                logger.info(f"Analyzing batch {idx + 1}/{len(batches)}: frames {batch['start_idx']}-{batch['end_idx']}")
+                
+                # 构建带字幕的提示词
+                messages = self._build_video_with_transcript_messages(
+                    batch["frames"],
+                    batch["transcript"],
+                    batch["start_time"],
+                    batch["end_time"]
+                )
+                
+                # 调用AI
+                response_data = await self._call_api(messages)
+                
+                # 解析结果
+                segment_result = self._parse_short_video_tagging_response(response_data)
+                
+                # 构建时间轴片段
+                segment = {
+                    "start_time": round(batch["start_time"], 3),
+                    "end_time": round(batch["end_time"], 3),
+                    "spoken_content": batch["transcript"],
+                    "main_subject": segment_result.main_subject or "",
+                    "action_or_event": segment_result.action_or_event or "",
+                    "scene_setting": segment_result.scene_setting or "",
+                    "visual_style": segment_result.visual_style or "",
+                    "color_palette": segment_result.color_palette or "",
+                    "emotion_dominant": segment_result.emotion_dominant or "",
+                    "atmosphere_tags": segment_result.atmosphere_tags or [],
+                    "viral_meme_tags": segment_result.viral_meme_tags or [],
+                    "keywords": segment_result.keywords or [],
+                    "frame_range": f"{batch['start_idx'] + 1}-{batch['end_idx'] + 1}"
+                }
+                
+                timeline_segments.append(segment)
+            
+            # 生成整体视频打标（基于所有片段的汇总）
+            overall_messages = self._build_overall_tagging_from_segments(
+                timeline_segments,
+                video_duration,
+                len(frame_urls)
+            )
+            
+            overall_response = await self._call_api(overall_messages)
+            overall_tagging = self._parse_short_video_tagging_response(overall_response)
+            
+            logger.info(f"Video analysis with transcript completed: {len(timeline_segments)} segments")
+            
+            return {
+                "overall_tagging": overall_tagging,
+                "timeline_segments": timeline_segments,
+                "metadata": {
+                    "video_duration": video_duration,
+                    "total_frames": len(frame_urls),
+                    "total_segments": len(timeline_segments),
+                    "has_transcript": True
+                }
+            }
+            
+        except Exception as e:
+            logger.error(f"Error in video analysis with transcript: {e}", exc_info=True)
+            raise
+    
+    def _build_video_with_transcript_messages(
+        self,
+        frame_urls: List[str],
+        transcript_text: str,
+        start_time: float,
+        end_time: float
+    ) -> List[Dict]:
+        """构建带字幕的视频分析提示词"""
+        
+        system_content = """你是一位专业的视频内容分析师。你的任务是基于视频画面（一系列帧图片）和对应时间段的语音内容（ASR识别结果），对视频片段进行全面分析。
+
+请综合画面和语音内容，按照以下格式输出JSON结果：
+
+1. Main Subject (核心主体): 简短精准地描述画面和内容的主要焦点
+2. Action or Event (动作或事件): 结合画面和语音，描述这段时间发生的核心事件
+3. Scene Setting (场景设置): 描述地点、环境、时间等背景信息
+4. Visual Style (视觉风格): 描述拍摄技巧和画面质感
+5. Color Palette (色彩基调): 描述画面主要色彩
+6. Emotion Dominant (主导情感): 只用一个词概括情绪
+7. Atmosphere Tags (氛围标签): 3-5个氛围标签
+8. Viral Meme Tags (网络热梗标签): 3-5个热梗标签，无相关则返回空列表
+9. Keywords (关键词): 5-10个关键词，结合画面和语音内容
+
+你的输出必须是纯JSON格式，不要包含任何解释、注释或markdown块。
+
+JSON Schema:
+{
+    "main_subject": "string",
+    "action_or_event": "string",
+    "scene_setting": "string",
+    "visual_style": "string",
+    "color_palette": "string",
+    "emotion_dominant": "string",
+    "atmosphere_tags": ["string"],
+    "viral_meme_tags": ["string"],
+    "keywords": ["string"]
+}"""
+        
+        # 构建用户消息
+        user_parts = []
+        
+        # 添加时间和字幕信息
+        time_text = f"**时间段：** {start_time:.1f}秒 - {end_time:.1f}秒\n\n"
+        if transcript_text:
+            time_text += f"**语音内容：**\n{transcript_text}\n\n"
+        else:
+            time_text += "**语音内容：** （无语音或静音）\n\n"
+        
+        time_text += "**画面内容：**\n请分析以下帧序列："
+        
+        user_parts.append({"type": "text", "text": time_text})
+        
+        # 添加图片
+        for url in frame_urls:
+            user_parts.append({
+                "type": "image_url",
+                "image_url": {"url": url}
+            })
+        
+        return [
+            {"role": "system", "content": system_content},
+            {"role": "user", "content": user_parts}
+        ]
+    
+    def _build_overall_tagging_from_segments(
+        self,
+        segments: List[dict],
+        video_duration: float,
+        total_frames: int
+    ) -> List[Dict]:
+        """基于所有片段生成整体视频打标的提示词"""
+        
+        system_content = """你是一位专业的视频内容分析师。现在需要你基于视频各个时间段的分析结果，生成整体视频的打标。
+
+请综合所有片段的信息，提取出整个视频的核心特征和主题，按照以下格式输出JSON结果：
+
+你的输出必须是纯JSON格式，不要包含任何解释、注释或markdown块。
+
+JSON Schema:
+{
+    "main_subject": "string",
+    "action_or_event": "string",
+    "scene_setting": "string",
+    "visual_style": "string",
+    "color_palette": "string",
+    "emotion_dominant": "string",
+    "atmosphere_tags": ["string"],
+    "viral_meme_tags": ["string"],
+    "keywords": ["string"]
+}"""
+        
+        # 构建片段摘要
+        segments_summary = f"**视频总时长：** {video_duration:.1f}秒\n"
+        segments_summary += f"**总帧数：** {total_frames}\n"
+        segments_summary += f"**片段数量：** {len(segments)}\n\n"
+        segments_summary += "**各时间段分析结果：**\n\n"
+        
+        for idx, seg in enumerate(segments):
+            segments_summary += f"片段 {idx + 1}: {seg['start_time']:.1f}s - {seg['end_time']:.1f}s\n"
+            if seg.get('spoken_content'):
+                segments_summary += f"  语音: {seg['spoken_content'][:100]}...\n" if len(seg.get('spoken_content', '')) > 100 else f"  语音: {seg['spoken_content']}\n"
+            segments_summary += f"  主体: {seg['main_subject']}\n"
+            segments_summary += f"  事件: {seg['action_or_event']}\n"
+            segments_summary += f"  关键词: {', '.join(seg['keywords'][:5])}\n\n"
+        
+        segments_summary += "\n请基于以上所有片段，生成整个视频的整体打标。"
+        
+        return [
+            {"role": "system", "content": system_content},
+            {"role": "user", "content": segments_summary}
+        ]
 
 
 # Global service instance

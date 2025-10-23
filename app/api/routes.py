@@ -2,7 +2,9 @@
 import logging
 import asyncio
 import uuid
-from typing import Dict, Optional
+import json
+import httpx
+from typing import Dict, Optional, List
 from datetime import datetime, timedelta
 from urllib.parse import unquote
 
@@ -19,6 +21,8 @@ from app.models.schemas import (
     BatchTaskStatusResponse,
     ImageAnalysisRequest,
     SingleImageTaggingResult,
+    FrameInfo,
+    TimelineSegmentTagging,
 )
 from app.services.ice_client import ice_service
 from app.services.oss_client import oss_service
@@ -167,6 +171,94 @@ class ConcurrencyManager:
 
 # Global concurrency manager instance
 concurrency_manager = ConcurrencyManager()
+
+
+async def download_transcript(transcript_url: str) -> Optional[List[dict]]:
+    """
+    从OSS下载字幕文件
+    
+    Args:
+        transcript_url: 字幕文件的OSS URL
+        
+    Returns:
+        字幕片段列表，格式为：
+        [
+            {"start_time": 0.0, "end_time": 3.5, "text": "大家好..."},
+            {"start_time": 3.5, "end_time": 7.2, "text": "今天..."},
+            ...
+        ]
+        如果下载失败返回None
+    """
+    try:
+        logger.info(f"Downloading transcript from: {transcript_url}")
+        
+        async with httpx.AsyncClient(timeout=30.0) as client:
+            response = await client.get(transcript_url)
+            response.raise_for_status()
+            
+            # 解析JSON
+            transcript_data = response.json()
+            
+            # 验证格式
+            if not isinstance(transcript_data, list):
+                logger.error("Transcript format error: expected list")
+                return None
+            
+            # 验证每个片段的格式
+            for segment in transcript_data:
+                if not all(key in segment for key in ["start_time", "end_time", "text"]):
+                    logger.error(f"Invalid segment format: {segment}")
+                    return None
+            
+            logger.info(f"Successfully downloaded transcript with {len(transcript_data)} segments")
+            return transcript_data
+            
+    except httpx.HTTPError as e:
+        logger.error(f"HTTP error downloading transcript: {e}")
+        return None
+    except json.JSONDecodeError as e:
+        logger.error(f"JSON decode error: {e}")
+        return None
+    except Exception as e:
+        logger.error(f"Unexpected error downloading transcript: {e}", exc_info=True)
+        return None
+
+
+def match_frames_with_transcript(
+    frames: List[FrameInfo],
+    transcript: List[dict],
+    video_duration: float
+) -> Dict[int, str]:
+    """
+    为每个帧匹配对应时间段的字幕文本
+    
+    Args:
+        frames: 帧信息列表
+        transcript: 字幕片段列表
+        video_duration: 视频总时长
+        
+    Returns:
+        字典，key为帧索引，value为对应时间段的字幕文本
+    """
+    frame_transcripts = {}
+    
+    for idx, frame in enumerate(frames):
+        frame_time = frame.timestamp
+        
+        # 找到该时间点对应的字幕
+        matched_texts = []
+        for segment in transcript:
+            if segment["start_time"] <= frame_time <= segment["end_time"]:
+                matched_texts.append(segment["text"])
+        
+        # 合并匹配到的字幕文本
+        if matched_texts:
+            frame_transcripts[idx] = " ".join(matched_texts)
+        else:
+            frame_transcripts[idx] = ""
+    
+    return frame_transcripts
+
 
 # Create router
 router = APIRouter()
@@ -397,16 +489,56 @@ async def process_video_analysis_task(
             task_data["progress"] = 30
             task_data["updated_at"] = datetime.now()
             
-            # 抽帧
+            # 抽帧（支持SMART智能模式走ICE模板截图）
             logger.info(
                 f"[{task_id}] Extracting frames: "
                 f"duration={media_info['duration']}s, level={request.frame_level.value}"
             )
-            frames = oss_service.extract_frames_by_oss(
-                video_oss_path=video_oss_path,
-                video_duration=media_info["duration"],
-                frame_level=request.frame_level
-            )
+            if request.frame_level == FrameLevel.SMART:
+                # 严格使用ICE模板，不做任何回退
+                if not settings.ice_snapshot_template_id:
+                    raise ValueError("未配置ICE模板ID，无法使用智能抽帧")
+
+                # 计算输出目录前缀：{brand}/{YYYY-MM}/video_frames/{moss_id}/smart
+                base_dir = oss_service.generate_oss_path(
+                    brand_name=request.brand_name,
+                    moss_id=request.moss_id
+                )
+                output_prefix = f"{base_dir}/smart"
+
+                # 动态帧数：未提供则使用默认50，范围1-200
+                n = request.smart_frame_count if request.smart_frame_count is not None else settings.default_intelligent_frame_count
+                if n < 1 or n > 200:
+                    raise ValueError("smart_frame_count 超出范围(1-200)")
+
+                # 提交ICE截图任务（仅覆盖Count，其它沿用模板中的关键帧等设置），直接获取URL列表
+                frame_urls = ice_service.submit_snapshot_job_with_template(
+                    media_id=request.media_id,
+                    template_id=settings.ice_snapshot_template_id,
+                    count=n
+                )
+
+                # 将URL封装为 FrameInfo（直接使用ICE返回的签名URL，避免二次签名）
+                frame_interval = 0.0
+                if frame_urls and media_info.get("duration"):
+                    frame_interval = media_info["duration"] / max(len(frame_urls), 1)
+
+                frames = [
+                    FrameInfo(
+                        frame_number=idx + 1,
+                        timestamp=idx * frame_interval,
+                        url=url,
+                        oss_path=url  # 保留原始URL，防止再次生成签名导致404
+                    )
+                    for idx, url in enumerate(frame_urls)
+                ]
+            else:
+                # 低/中/高：保持现有OSS实时抽帧
+                frames = oss_service.extract_frames_by_oss(
+                    video_oss_path=video_oss_path,
+                    video_duration=media_info["duration"],
+                    frame_level=request.frame_level
+                )
             
             if not frames or len(frames) == 0:
                 raise ValueError("抽帧失败：未提取到任何帧")
@@ -418,6 +550,19 @@ async def process_video_analysis_task(
             
         finally:
             concurrency_manager.release_extraction()
+        
+        # ========== 阶段1.5: 下载字幕（如果有） ==========
+        transcript_data = None
+        if request.transcript_url:
+            task_data["message"] = "正在下载字幕文件..."
+            task_data["progress"] = 55
+            task_data["updated_at"] = datetime.now()
+            
+            transcript_data = await download_transcript(request.transcript_url)
+            if transcript_data:
+                logger.info(f"[{task_id}] Successfully downloaded transcript with {len(transcript_data)} segments")
+            else:
+                logger.warning(f"[{task_id}] Failed to download transcript, will proceed with visual-only analysis")
         
         # ========== 阶段2: AI分析（受分析并发限制） ==========
         await concurrency_manager.acquire_analysis()
@@ -434,11 +579,26 @@ async def process_video_analysis_task(
                 "frame_count": len(frames),
             }
             
-            # 使用新的短视频打标分析功能
-            tagging_result = await doubao_service.analyze_short_video_frames(
-                frame_urls=task_data["frames"],
-                context=context
-            )
+            # 根据是否有字幕选择不同的分析方法
+            if transcript_data:
+                # 带字幕的联合分析
+                logger.info(f"[{task_id}] Using video analysis with transcript")
+                analysis_result = await doubao_service.analyze_video_with_transcript(
+                    frame_urls=task_data["frames"],
+                    transcript=transcript_data,
+                    video_duration=media_info.get("duration", 0),
+                    context=context
+                )
+                tagging_result = analysis_result["overall_tagging"]
+                timeline_segments = analysis_result.get("timeline_segments", [])
+            else:
+                # 纯视觉分析
+                logger.info(f"[{task_id}] Using visual-only analysis")
+                tagging_result = await doubao_service.analyze_short_video_frames(
+                    frame_urls=task_data["frames"],
+                    context=context
+                )
+                timeline_segments = []
             
             # 构建完整结果
             task_data["status"] = TaskStatus.COMPLETED
@@ -459,7 +619,8 @@ async def process_video_analysis_task(
             safe_viral_meme_tags = ensure_list(tagging_result.viral_meme_tags)
             safe_keywords = ensure_list(tagging_result.keywords)
             
-            task_data["result"] = {
+            # 构建结果对象
+            result_data = {
                 "moss_id": request.moss_id,
                 "brand_name": request.brand_name,
                 "media_id": request.media_id,
@@ -480,9 +641,17 @@ async def process_video_analysis_task(
                     "video_duration": media_info.get("duration"),
                     "video_resolution": media_info.get("resolution"),
                     "model_used": settings.doubao_model,
-                    "analysis_type": "short_video_tagging"
+                    "analysis_type": "short_video_tagging_with_transcript" if transcript_data else "short_video_tagging",
+                    "has_transcript": bool(transcript_data)
                 }
             }
+            
+            # 如果有时间轴片段，添加到结果中
+            if timeline_segments:
+                result_data["timeline_segments"] = timeline_segments
+                result_data["metadata"]["total_segments"] = len(timeline_segments)
+            
+            task_data["result"] = result_data
             task_data["completed_at"] = datetime.now()
             task_data["updated_at"] = datetime.now()
             

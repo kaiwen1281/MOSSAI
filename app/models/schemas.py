@@ -97,7 +97,17 @@ class VideoAnalysisRequest(BaseModel):
     moss_id: str = Field(..., description="MOSS系统视频ID")
     brand_name: str = Field(..., description="品牌方名称")
     media_id: str = Field(..., description="阿里云ICE媒资ID")
-    frame_level: FrameLevel = Field(..., description="抽帧等级: low/medium/high")
+    frame_level: FrameLevel = Field(..., description="抽帧等级: low/medium/high/smart")
+    smart_frame_count: Optional[int] = Field(
+        default=None,
+        ge=1,
+        le=200,
+        description="智能模式目标帧数（1-200）；未传则使用默认50"
+    )
+    transcript_url: Optional[str] = Field(
+        default=None,
+        description="字幕文件OSS URL（可选）；如果提供，将进行画面+字幕联合分析"
+    )
     
     class Config:
         json_schema_extra = {
@@ -105,7 +115,9 @@ class VideoAnalysisRequest(BaseModel):
                 "moss_id": "video_20231017_001",
                 "brand_name": "nike",
                 "media_id": "****0343c45e0ce64664a",
-                "frame_level": "medium"
+                "frame_level": "smart",
+                "smart_frame_count": 100,
+                "transcript_url": "https://oss.../transcripts/xxx.json"
             }
         }
 
@@ -290,6 +302,94 @@ class ImageAnalysisRequest(BaseModel):
                 "moss_id": "image_20231017_001",
                 "brand_name": "nike",
                 "media_id": "****0343c45e0ce64664a"
+            }
+        }
+
+
+class TimelineSegmentTagging(BaseModel):
+    """时间轴片段打标结果（与整体视频打标结构一致）"""
+    start_time: float = Field(..., description="开始时间（秒）")
+    end_time: float = Field(..., description="结束时间（秒）")
+    spoken_content: Optional[str] = Field(None, description="这段时间的语音内容（ASR识别结果）")
+    
+    # 9个标准打标字段
+    main_subject: str = Field(..., description="核心主体")
+    action_or_event: str = Field(..., description="动作或事件")
+    scene_setting: str = Field(..., description="场景设置")
+    visual_style: str = Field(..., description="视觉风格")
+    color_palette: str = Field(..., description="色彩基调")
+    emotion_dominant: str = Field(..., description="主导情感")
+    atmosphere_tags: List[str] = Field(default_factory=list, description="氛围标签")
+    viral_meme_tags: List[str] = Field(default_factory=list, description="网络热梗标签")
+    keywords: List[str] = Field(default_factory=list, description="关键词")
+    
+    # 辅助字段
+    frame_range: Optional[str] = Field(None, description="对应的帧范围，如 '1-15'")
+    
+    class Config:
+        json_schema_extra = {
+            "example": {
+                "start_time": 0.0,
+                "end_time": 30.5,
+                "spoken_content": "大家好，欢迎来到新品发布会。今天我们将介绍...",
+                "main_subject": "主持人和产品LOGO",
+                "action_or_event": "开场介绍，展示产品外观",
+                "scene_setting": "舞台中央，背景大屏显示产品图片",
+                "visual_style": "全景镜头，主持人正面特写",
+                "color_palette": "蓝白色调，明亮照明",
+                "emotion_dominant": "期待",
+                "atmosphere_tags": ["开场", "介绍", "专业"],
+                "viral_meme_tags": [],
+                "keywords": ["新品", "发布会", "欢迎"],
+                "frame_range": "1-15"
+            }
+        }
+
+
+class VideoAnalysisWithTranscriptResult(BaseModel):
+    """带字幕的视频分析结果"""
+    # 整体视频打标
+    overall_tagging: ShortVideoTaggingResult = Field(..., description="整体视频的打标结果")
+    
+    # 时间轴片段打标
+    timeline_segments: List[TimelineSegmentTagging] = Field(
+        default_factory=list,
+        description="时间轴片段数组，每个片段包含完整的打标信息"
+    )
+    
+    # 元数据
+    metadata: dict = Field(
+        default_factory=dict,
+        description="元数据信息（视频时长、分辨率、模型等）"
+    )
+    
+    class Config:
+        json_schema_extra = {
+            "example": {
+                "overall_tagging": {
+                    "main_subject": "产品发布会，主讲人介绍新款智能手机",
+                    "action_or_event": "产品功能演示和技术讲解",
+                    "scene_setting": "室内会议厅，专业舞台灯光",
+                    "visual_style": "专业录制，多机位切换",
+                    "color_palette": "蓝白色调为主",
+                    "emotion_dominant": "专业",
+                    "atmosphere_tags": ["科技", "专业", "商务"],
+                    "viral_meme_tags": ["新品发布"],
+                    "keywords": ["iPhone", "智能手机", "5G"]
+                },
+                "timeline_segments": [
+                    {
+                        "start_time": 0.0,
+                        "end_time": 30.5,
+                        "spoken_content": "大家好，欢迎...",
+                        "main_subject": "主持人开场",
+                        "keywords": ["欢迎", "介绍"]
+                    }
+                ],
+                "metadata": {
+                    "video_duration": 600.0,
+                    "total_segments": 10
+                }
             }
         }
 
