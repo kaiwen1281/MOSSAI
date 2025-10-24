@@ -6,13 +6,12 @@
 
 MOSS-AI 是一个基于 FastAPI 的无状态微服务，专注于视频和图片内容的智能处理与分析。主要功能包括：
 
-- 🎬 **视频抽帧**：
-  - 低/中/高：基于阿里云OSS实时处理的高效抽帧
-  - 智能（SMART）：基于阿里云ICE SubmitSnapshotJob + 模板ID，支持动态覆盖帧数
+- 🎬 **视频抽帧**：基于阿里云OSS实时处理的高效抽帧
 - 🖼️ **图片分析**：直接通过媒资ID或URL进行AI内容理解
 - 🤖 **AI分析**：使用豆包大模型进行智能内容理解
 - 📦 **多格式支持**：支持视频、图片 两种格式
-- 🎯 **灵活抽帧**：提供低/中/高/智能（SMART）四种抽帧等级
+- 🎯 **灵活抽帧**：提供低/中/高三种抽帧等级
+- 🎙️ **字幕分析**：支持ASR字幕与视频画面的联合分析
 - ☁️ **云存储**：自动管理OSS存储和URL签名
 - 🚀 **极速响应**：OSS实时抽帧，无需等待异步任务
 
@@ -99,12 +98,11 @@ uv sync
 ALIYUN_ACCESS_KEY_ID=your_access_key_id
 ALIYUN_ACCESS_KEY_SECRET=your_access_key_secret
 
-# 阿里云ICE配置（SMART 模式）
+# 阿里云ICE配置
 ALIYUN_ICE_REGION=cn-shanghai
 ALIYUN_ICE_ENDPOINT=ice.cn-shanghai.aliyuncs.com
-ICE_SNAPSHOT_TEMPLATE_ID=your_snapshot_template_id
 
-# 阿里云OSS配置（低/中/高）
+# 阿里云OSS配置
 ALIYUN_OSS_ENDPOINT=oss-cn-shanghai.aliyuncs.com
 ALIYUN_OSS_BUCKET=your-bucket-name
 
@@ -116,9 +114,6 @@ DOUBAO_ENDPOINT=https://ark.cn-beijing.volces.com/api/v3
 # 服务配置
 MOSSAI_HOST=0.0.0.0
 MOSSAI_PORT=8001
-
-# 智能模式默认帧数（可选，默认50）
-DEFAULT_INTELLIGENT_FRAME_COUNT=50
 ```
 
 完整配置说明请参考项目中的 `.env.template` 文件。
@@ -156,8 +151,7 @@ Content-Type: application/json
   "media_id": "abc123def456",
   "moss_id": "video_001",
   "brand_name": "example_brand",
-  "frame_level": "medium",
-  "smart_frame_count": 100
+  "frame_level": "medium"
 }
 ```
 
@@ -188,7 +182,7 @@ Content-Type: application/json
 }
 ```
 
-### 4. 提交视频分析（SMART 智能模式：ICE）
+### 4. 提交视频分析（含字幕支持）
 
 ```http
 POST /api/analyze-video
@@ -198,15 +192,15 @@ Content-Type: application/json
   "moss_id": "ed648c17-cb50-4a3d-a65f-23a5ac1ea20b",
   "brand_name": "JD003",
   "media_id": "932b8070af0e71f0a983f6e7c7496302",
-  "frame_level": "smart",
-  "smart_frame_count": 100
+  "frame_level": "medium",
+  "transcript_url": "https://oss.../transcripts/xxx.json"
 }
 ```
 
 说明：
 - 必填参数：`moss_id`, `brand_name`, `media_id`, `frame_level`
-- 当 `frame_level=smart` 时，`smart_frame_count` 生效（1-200，未传默认50）；模板中的其它参数（关键帧等）不变
-- 严格不回退：若ICE任务失败或参数非法，将返回错误，不会切换到OSS抽帧
+- `frame_level` 支持: `low`（每10秒）, `medium`（每3秒）, `high`（每秒）
+- `transcript_url`（可选）：提供字幕文件OSS URL，将进行画面+字幕联合分析
 
 成功响应（异步任务提交）：
 ```json
@@ -234,8 +228,7 @@ Content-Type: application/json
   "media_type": "video",
   "moss_id": "c6ffb0a0-1bfe-46dc-9406-0d0faacad0b4",
   "brand_name": "京东业务一",
-  "frame_level": "smart",
-  "smart_frame_count": 50,
+  "frame_level": "medium",
   "custom_prompt": "请重点分析产品特点"
 }
 ```
@@ -400,7 +393,7 @@ MOSS-AI 是无状态服务，不操作数据库。所有必要信息通过API参
 
 ### 4. URL有效期（与严格不回退）
 
-OSS签名URL默认有效期为24小时，确保在有效期内完成分析。SMART模式使用ICE返回的URL，避免二次签名；若ICE失败则直接报错，不回退到OSS。
+OSS签名URL默认有效期为24小时，确保在有效期内完成分析。
 
 ```
 
@@ -438,7 +431,7 @@ uv run mypy .
 1. **并发处理**：使用异步IO提高吞吐量
 2. **分段分析**：自动处理超长视频
 3. **缓存策略**：OSS URL缓存、结果缓存
-4. **智能抽帧**：减少不必要的帧数
+4. **灵活抽帧**：低/中/高三档抽帧策略，平衡精度与成本
 
 ## 故障排查
 
@@ -588,14 +581,14 @@ if __name__ == "__main__":
 
 ## 更新日志
 
-### v0.3.0 (2025-10-22)
+### v0.3.0 (2025-10-24)
 
-✅ 智能模式（SMART）上线（视频抽帧基于阿里云ICE模板截图）
-- 使用 SubmitSnapshotJob + 模板ID，支持请求时动态覆盖 Count（1-200，默认50）
-- 轮询 GetSnapshotJob（10/20/30/40/50s）直至 Success，再分页 GetSnapshotUrls（安全 PageSize≤20）
-- 严格不回退到OSS：ICE失败即报错，不做降级
-- 修复：避免对ICE已签名URL进行二次签名导致的下载错误
-- 新增环境变量：ICE_SNAPSHOT_TEMPLATE_ID、DEFAULT_INTELLIGENT_FRAME_COUNT、MOSSAI_HOST、MOSSAI_PORT
+✅ ASR 字幕分析支持上线
+- 支持通过 `transcript_url` 参数传递字幕文件 OSS URL
+- 自动下载并解析 JSON 格式的 ASR 字幕
+- 实现画面+字幕联合分析，提供更全面的内容理解
+- 优化视频分析提示词，结合语音内容进行打标
+- 移除智能抽帧模式（SMART），统一使用 OSS 抽帧（低/中/高）
 
 ### v0.2.0 (2025-10-17)
 

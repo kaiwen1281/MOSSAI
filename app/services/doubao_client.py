@@ -1101,6 +1101,180 @@ JSON Schema:
             {"role": "system", "content": system_content},
             {"role": "user", "content": segments_summary}
         ]
+    
+    async def analyze_video_with_visual_segments(
+        self,
+        frame_urls: List[str],
+        video_duration: float,
+        context: Optional[Dict] = None
+    ) -> Dict:
+        """
+        纯视觉分段分析：基于画面帧进行分段分析（无字幕）
+        
+        Args:
+            frame_urls: 帧图片URL列表（按时间顺序）
+            video_duration: 视频总时长（秒）
+            context: 视频上下文信息
+            
+        Returns:
+            {
+                "overall_tagging": ShortVideoTaggingResult,
+                "timeline_segments": List[TimelineSegmentTagging],
+                "metadata": dict
+            }
+        """
+        try:
+            logger.info(f"Starting visual-only segmentation analysis: {len(frame_urls)} frames, duration={video_duration}s")
+            
+            # 分批处理帧（每批10帧）
+            batch_size = 10
+            batches = []
+            
+            for i in range(0, len(frame_urls), batch_size):
+                batch_frames = frame_urls[i:i + batch_size]
+                
+                # 计算这批帧的时间范围
+                start_idx = i
+                end_idx = min(i + batch_size - 1, len(frame_urls) - 1)
+                
+                # 估算每帧的时间戳
+                frame_interval = video_duration / max(len(frame_urls), 1)
+                batch_start_time = start_idx * frame_interval
+                batch_end_time = end_idx * frame_interval
+                
+                batches.append({
+                    "frames": batch_frames,
+                    "start_time": batch_start_time,
+                    "end_time": batch_end_time,
+                    "start_idx": start_idx,
+                    "end_idx": end_idx
+                })
+            
+            # 分析每个批次
+            timeline_segments = []
+            
+            for idx, batch in enumerate(batches):
+                logger.info(f"Analyzing visual batch {idx + 1}/{len(batches)}: frames {batch['start_idx']}-{batch['end_idx']}")
+                
+                # 构建纯视觉分析提示词
+                messages = self._build_visual_segment_messages(
+                    batch["frames"],
+                    batch["start_time"],
+                    batch["end_time"]
+                )
+                
+                # 调用AI
+                response_data = await self._call_api(messages)
+                
+                # 解析结果
+                segment_result = self._parse_short_video_tagging_response(response_data)
+                
+                # 构建时间轴片段
+                segment = {
+                    "start_time": round(batch["start_time"], 3),
+                    "end_time": round(batch["end_time"], 3),
+                    "spoken_content": None,  # 纯视觉分析无语音内容
+                    "main_subject": segment_result.main_subject or "",
+                    "action_or_event": segment_result.action_or_event or "",
+                    "scene_setting": segment_result.scene_setting or "",
+                    "visual_style": segment_result.visual_style or "",
+                    "color_palette": segment_result.color_palette or "",
+                    "emotion_dominant": segment_result.emotion_dominant or "",
+                    "atmosphere_tags": segment_result.atmosphere_tags or [],
+                    "viral_meme_tags": segment_result.viral_meme_tags or [],
+                    "keywords": segment_result.keywords or [],
+                    "frame_range": f"{batch['start_idx'] + 1}-{batch['end_idx'] + 1}"
+                }
+                
+                timeline_segments.append(segment)
+            
+            # 生成整体视频打标（基于所有片段的汇总）
+            overall_messages = self._build_overall_tagging_from_segments(
+                timeline_segments,
+                video_duration,
+                len(frame_urls)
+            )
+            
+            overall_response = await self._call_api(overall_messages)
+            overall_tagging = self._parse_short_video_tagging_response(overall_response)
+            
+            logger.info(f"Visual segmentation analysis completed: {len(timeline_segments)} segments")
+            
+            return {
+                "overall_tagging": overall_tagging,
+                "timeline_segments": timeline_segments,
+                "metadata": {
+                    "video_duration": video_duration,
+                    "total_frames": len(frame_urls),
+                    "total_segments": len(timeline_segments),
+                    "has_transcript": False
+                }
+            }
+            
+        except Exception as e:
+            logger.error(f"Error in visual segmentation analysis: {e}", exc_info=True)
+            raise
+    
+    def _build_visual_segment_messages(
+        self,
+        frame_urls: List[str],
+        start_time: float,
+        end_time: float
+    ) -> List[Dict]:
+        """构建纯视觉分段分析提示词"""
+        
+        system_content = """你是一位专业的视频内容分析师。你的任务是基于视频画面（一系列帧图片）对视频片段进行全面分析。
+
+请仔细观察画面，按照以下格式输出JSON结果：
+
+1. Main Subject (核心主体): 简短精准地描述画面的主要焦点
+2. Action or Event (动作或事件): 描述这段时间画面中发生的核心事件
+3. Scene Setting (场景设置): 描述地点、环境、时间等背景信息
+4. Visual Style (视觉风格): 描述拍摄技巧和画面质感
+5. Color Palette (色彩基调): 描述画面主要的色彩倾向
+6. Emotion Dominant (主导情感): 只用一个词总结画面传达的最强烈的情绪
+7. Atmosphere Tags (氛围标签): 3-5个描述画面整体氛围的标签
+8. Viral Meme Tags (网络热梗标签): 如果画面包含可识别的网络热梗，列出3-5个；否则留空
+9. Keywords (关键词): 5-10个高度相关的检索关键词
+
+输出格式必须是标准JSON格式：
+{
+  "main_subject": "string",
+  "action_or_event": "string",
+  "scene_setting": "string",
+  "visual_style": "string",
+  "color_palette": "string",
+  "emotion_dominant": "string",
+  "atmosphere_tags": ["tag1", "tag2", "tag3"],
+  "viral_meme_tags": ["meme1", "meme2"],
+  "keywords": ["keyword1", "keyword2", ...]
+}
+
+注意事项：
+1. 所有字符串字段不能为null，至少返回空字符串
+2. 所有数组字段不能为null，至少返回空数组[]
+3. atmosphere_tags至少包含3个标签，最多5个
+4. viral_meme_tags如果没有热梗则返回空数组[]
+5. keywords至少包含5个，最多10个
+6. 确保输出是合法的JSON格式，可以被直接解析"""
+        
+        # 构建用户消息
+        time_text = f"**时间段：** {start_time:.1f}秒 - {end_time:.1f}秒\n\n"
+        time_text += "**画面帧序列：**\n"
+        time_text += "请分析以下画面帧（按时间顺序），给出这个时间段的完整打标。\n\n"
+        
+        # 构建包含图片的消息内容
+        content = [{"type": "text", "text": time_text}]
+        for url in frame_urls:
+            content.append({
+                "type": "image_url",
+                "image_url": {"url": url}
+            })
+        
+        return [
+            {"role": "system", "content": system_content},
+            {"role": "user", "content": content}
+        ]
 
 
 # Global service instance

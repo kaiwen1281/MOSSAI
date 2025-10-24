@@ -489,56 +489,18 @@ async def process_video_analysis_task(
             task_data["progress"] = 30
             task_data["updated_at"] = datetime.now()
             
-            # 抽帧（支持SMART智能模式走ICE模板截图）
+            # 抽帧（使用 OSS 实时抽帧）
             logger.info(
                 f"[{task_id}] Extracting frames: "
                 f"duration={media_info['duration']}s, level={request.frame_level.value}"
             )
-            if request.frame_level == FrameLevel.SMART:
-                # 严格使用ICE模板，不做任何回退
-                if not settings.ice_snapshot_template_id:
-                    raise ValueError("未配置ICE模板ID，无法使用智能抽帧")
-
-                # 计算输出目录前缀：{brand}/{YYYY-MM}/video_frames/{moss_id}/smart
-                base_dir = oss_service.generate_oss_path(
-                    brand_name=request.brand_name,
-                    moss_id=request.moss_id
-                )
-                output_prefix = f"{base_dir}/smart"
-
-                # 动态帧数：未提供则使用默认50，范围1-200
-                n = request.smart_frame_count if request.smart_frame_count is not None else settings.default_intelligent_frame_count
-                if n < 1 or n > 200:
-                    raise ValueError("smart_frame_count 超出范围(1-200)")
-
-                # 提交ICE截图任务（仅覆盖Count，其它沿用模板中的关键帧等设置），直接获取URL列表
-                frame_urls = ice_service.submit_snapshot_job_with_template(
-                    media_id=request.media_id,
-                    template_id=settings.ice_snapshot_template_id,
-                    count=n
-                )
-
-                # 将URL封装为 FrameInfo（直接使用ICE返回的签名URL，避免二次签名）
-                frame_interval = 0.0
-                if frame_urls and media_info.get("duration"):
-                    frame_interval = media_info["duration"] / max(len(frame_urls), 1)
-
-                frames = [
-                    FrameInfo(
-                        frame_number=idx + 1,
-                        timestamp=idx * frame_interval,
-                        url=url,
-                        oss_path=url  # 保留原始URL，防止再次生成签名导致404
-                    )
-                    for idx, url in enumerate(frame_urls)
-                ]
-            else:
-                # 低/中/高：保持现有OSS实时抽帧
-                frames = oss_service.extract_frames_by_oss(
-                    video_oss_path=video_oss_path,
-                    video_duration=media_info["duration"],
-                    frame_level=request.frame_level
-                )
+            
+            # 使用 OSS 实时抽帧（低/中/高三档）
+            frames = oss_service.extract_frames_by_oss(
+                video_oss_path=video_oss_path,
+                video_duration=media_info["duration"],
+                frame_level=request.frame_level
+            )
             
             if not frames or len(frames) == 0:
                 raise ValueError("抽帧失败：未提取到任何帧")
@@ -573,27 +535,41 @@ async def process_video_analysis_task(
             
             # 短视频素材打标分析
             logger.info(f"[{task_id}] Analyzing {len(frames)} frames for short video tagging")
+            video_duration = media_info.get("duration", 0)
             context = {
-                "duration": media_info.get("duration", 0),
+                "duration": video_duration,
                 "resolution": media_info.get("resolution"),
                 "frame_count": len(frames),
             }
             
-            # 根据是否有字幕选择不同的分析方法
-            if transcript_data:
-                # 带字幕的联合分析
-                logger.info(f"[{task_id}] Using video analysis with transcript")
+            # 判断是否需要分段：7秒以上的视频需要分段
+            should_segment = video_duration > 7.0
+            
+            # 根据是否有字幕和视频时长选择不同的分析方法
+            if transcript_data and should_segment:
+                # 带字幕的联合分析（7秒以上）
+                logger.info(f"[{task_id}] Using video analysis with transcript (duration={video_duration}s)")
                 analysis_result = await doubao_service.analyze_video_with_transcript(
                     frame_urls=task_data["frames"],
                     transcript=transcript_data,
-                    video_duration=media_info.get("duration", 0),
+                    video_duration=video_duration,
+                    context=context
+                )
+                tagging_result = analysis_result["overall_tagging"]
+                timeline_segments = analysis_result.get("timeline_segments", [])
+            elif should_segment:
+                # 纯视觉分段分析（7秒以上，无字幕）
+                logger.info(f"[{task_id}] Using visual-only segmentation analysis (duration={video_duration}s)")
+                analysis_result = await doubao_service.analyze_video_with_visual_segments(
+                    frame_urls=task_data["frames"],
+                    video_duration=video_duration,
                     context=context
                 )
                 tagging_result = analysis_result["overall_tagging"]
                 timeline_segments = analysis_result.get("timeline_segments", [])
             else:
-                # 纯视觉分析
-                logger.info(f"[{task_id}] Using visual-only analysis")
+                # 短视频（7秒以下）- 不分段，只做整体打标
+                logger.info(f"[{task_id}] Using simple tagging for short video (duration={video_duration}s, no segmentation)")
                 tagging_result = await doubao_service.analyze_short_video_frames(
                     frame_urls=task_data["frames"],
                     context=context

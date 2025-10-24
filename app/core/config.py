@@ -27,7 +27,6 @@ class Settings(BaseSettings):
     aliyun_access_key_secret: str
     aliyun_ice_region: str = "cn-shanghai"
     aliyun_ice_endpoint: str = "ice.cn-shanghai.aliyuncs.com"
-    ice_snapshot_template_id: Optional[str] = None  # ICE抽帧模板ID（可选）
     
     # Aliyun OSS Configuration
     aliyun_oss_endpoint: str
@@ -51,7 +50,6 @@ class Settings(BaseSettings):
     frame_level_high: int = 1  # 1 second per frame
     
     # Frame Configuration
-    default_intelligent_frame_count: int = 50
     frame_width: int = 1280  # Output frame width
     frame_format: str = "jpg"  # jpg or png
     frame_quality: int = 95

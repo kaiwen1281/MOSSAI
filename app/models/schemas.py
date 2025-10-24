@@ -10,7 +10,6 @@ class FrameLevel(str, Enum):
     LOW = "low"
     MEDIUM = "medium"
     HIGH = "high"
-    SMART = "smart"
 
 
 class TaskStatus(str, Enum):
@@ -37,7 +36,6 @@ class ExtractFramesRequest(BaseModel):
     moss_id: str = Field(..., description="MOSS系统中的视频ID")
     brand_name: str = Field(..., description="品牌方名称")
     frame_level: FrameLevel = Field(default=FrameLevel.MEDIUM, description="抽帧等级")
-    smart_frame_count: Optional[int] = Field(default=50, description="智能抽帧时的目标帧数")
     
     class Config:
         json_schema_extra = {
@@ -45,8 +43,7 @@ class ExtractFramesRequest(BaseModel):
                 "media_id": "abc123def456",
                 "moss_id": "video_001",
                 "brand_name": "example_brand",
-                "frame_level": "medium",
-                "smart_frame_count": 100
+                "frame_level": "medium"
             }
         }
 
@@ -79,7 +76,6 @@ class AnalyzeMediaRequest(BaseModel):
     moss_id: Optional[str] = Field(None, description="MOSS ID（视频/GIF需要）")
     brand_name: Optional[str] = Field(None, description="品牌方名称（视频/GIF需要）")
     frame_level: FrameLevel = Field(default=FrameLevel.MEDIUM, description="抽帧等级（仅视频/GIF）")
-    smart_frame_count: Optional[int] = Field(default=50, description="智能抽帧目标帧数")
     custom_prompt: Optional[str] = Field(None, description="自定义分析提示词")
     
     class Config:
@@ -97,13 +93,7 @@ class VideoAnalysisRequest(BaseModel):
     moss_id: str = Field(..., description="MOSS系统视频ID")
     brand_name: str = Field(..., description="品牌方名称")
     media_id: str = Field(..., description="阿里云ICE媒资ID")
-    frame_level: FrameLevel = Field(..., description="抽帧等级: low/medium/high/smart")
-    smart_frame_count: Optional[int] = Field(
-        default=None,
-        ge=1,
-        le=200,
-        description="智能模式目标帧数（1-200）；未传则使用默认50"
-    )
+    frame_level: FrameLevel = Field(..., description="抽帧等级: low/medium/high")
     transcript_url: Optional[str] = Field(
         default=None,
         description="字幕文件OSS URL（可选）；如果提供，将进行画面+字幕联合分析"
@@ -115,8 +105,7 @@ class VideoAnalysisRequest(BaseModel):
                 "moss_id": "video_20231017_001",
                 "brand_name": "nike",
                 "media_id": "****0343c45e0ce64664a",
-                "frame_level": "smart",
-                "smart_frame_count": 100,
+                "frame_level": "medium",
                 "transcript_url": "https://oss.../transcripts/xxx.json"
             }
         }
